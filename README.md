@@ -18,3 +18,7 @@ Each conversation turn fans out across four independent backends:
 - **Image generation** — a ComfyUI server driven over its WebSocket API using a bundled workflow (`default_workflow.json`). The reply's emotion and nudity flag are spliced into the prompt; preview frames stream into the portrait pane during diffusion, with the final PNG cached for the full-size viewer.
 
 Settings and conversation history are persisted as JSON under the OS user config directory.
+
+## License
+
+Released under the MIT License. See [LICENSE](LICENSE) for the full text.
