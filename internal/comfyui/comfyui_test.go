@@ -1,4 +1,4 @@
-package main
+package comfyui
 
 import (
 	"context"
@@ -7,7 +7,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
-	"strings"
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -29,10 +29,10 @@ func connection(id string, slot int) []any {
 
 func TestFindSampler(t *testing.T) {
 	cases := []struct {
-		name      string
-		graph     map[string]workflowNode
-		wantID    string
-		wantErr   string
+		name    string
+		graph   map[string]workflowNode
+		wantID  string
+		wantErr string
 	}{
 		{
 			name: "single KSamplerAdvanced is found",
@@ -266,28 +266,28 @@ func TestRewritePromptAndSeed_OnEmbeddedWorkflow(t *testing.T) {
 
 func TestSetConnectedText_MalformedInputs(t *testing.T) {
 	cases := []struct {
-		name      string
-		sampler   workflowNode
+		name       string
+		sampler    workflowNode
 		wantErrSub string
 	}{
 		{
-			name:      "missing key",
-			sampler:   node("KSampler", map[string]any{}),
+			name:       "missing key",
+			sampler:    node("KSampler", map[string]any{}),
 			wantErrSub: "is not a connection",
 		},
 		{
-			name:      "connection is not a list",
-			sampler:   node("KSampler", map[string]any{"positive": "wat"}),
+			name:       "connection is not a list",
+			sampler:    node("KSampler", map[string]any{"positive": "wat"}),
 			wantErrSub: "is not a connection",
 		},
 		{
-			name:      "connection has no node id",
-			sampler:   node("KSampler", map[string]any{"positive": []any{}}),
+			name:       "connection has no node id",
+			sampler:    node("KSampler", map[string]any{"positive": []any{}}),
 			wantErrSub: "is not a connection",
 		},
 		{
-			name:      "node id is not a string",
-			sampler:   node("KSampler", map[string]any{"positive": []any{float64(6), float64(0)}}),
+			name:       "node id is not a string",
+			sampler:    node("KSampler", map[string]any{"positive": []any{float64(6), float64(0)}}),
 			wantErrSub: "no source node id",
 		},
 	}
@@ -331,7 +331,7 @@ func TestRandomSeed_Range(t *testing.T) {
 func TestRandomHex_LengthAndCharset(t *testing.T) {
 	cases := []int{0, 1, 8, 16, 32}
 	for _, n := range cases {
-		t.Run("len "+strings.Repeat("x", n)[:0]+itoaForTest(n), func(t *testing.T) {
+		t.Run("len "+strconv.Itoa(n), func(t *testing.T) {
 			got := randomHex(n)
 			assert.Len(t, got, n*2, "hex output is 2x the byte count")
 			for _, c := range got {
@@ -416,7 +416,7 @@ func TestFetchImage(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	got, err := fetchImage(context.Background(),srv.Client(), srv.URL, imageRef{Filename: "out.png", Subfolder: "sub", Type: "output"})
+	got, err := fetchImage(context.Background(), srv.Client(), srv.URL, imageRef{Filename: "out.png", Subfolder: "sub", Type: "output"})
 	require.NoError(t, err)
 	assert.Equal(t, []byte{0x89, 'P', 'N', 'G'}, got)
 	assert.Equal(t, "out.png", gotQuery.Get("filename"))
@@ -430,12 +430,12 @@ func TestFetchImage_HTTPError(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	_, err := fetchImage(context.Background(),srv.Client(), srv.URL, imageRef{Filename: "x"})
+	_, err := fetchImage(context.Background(), srv.Client(), srv.URL, imageRef{Filename: "x"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "view HTTP 404")
 }
 
-func TestFetchComfyUICheckpoints(t *testing.T) {
+func TestFetchCheckpoints(t *testing.T) {
 	cases := []struct {
 		name       string
 		endpoint   string
@@ -498,7 +498,7 @@ func TestFetchComfyUICheckpoints(t *testing.T) {
 				t.Cleanup(srv.Close)
 				endpoint = srv.URL
 			}
-			got, err := fetchComfyUICheckpoints(endpoint)
+			got, err := FetchCheckpoints(endpoint)
 			if tc.wantErrSub != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tc.wantErrSub)
@@ -511,7 +511,7 @@ func TestFetchComfyUICheckpoints(t *testing.T) {
 }
 
 // comfyMux serves /system_stats and /object_info/CheckpointLoaderSimple
-// independently so testComfyUIConnection's two-step probe can be driven
+// independently so TestConnection's two-step probe can be driven
 // case-by-case.
 type comfyMux struct {
 	statsStatus int
@@ -537,7 +537,7 @@ func (m *comfyMux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func TestTestComfyUIConnection(t *testing.T) {
+func TestTestConnection(t *testing.T) {
 	cases := []struct {
 		name     string
 		setup    func(*comfyMux)
@@ -588,7 +588,7 @@ func TestTestComfyUIConnection(t *testing.T) {
 				t.Cleanup(srv.Close)
 				endpoint = srv.URL
 			}
-			got := testComfyUIConnection(endpoint)
+			got := TestConnection(endpoint)
 			assert.Contains(t, got, tc.wantSub)
 		})
 	}
@@ -601,27 +601,11 @@ func TestSaveCharacterImage_RoundTrip(t *testing.T) {
 	t.Setenv("APPDATA", dir)
 
 	payload := []byte{0x89, 'P', 'N', 'G', 0, 1, 2, 3}
-	require.NoError(t, saveCharacterImage(payload))
+	require.NoError(t, SaveCharacterImage(payload))
 
-	path, err := characterImagePath()
+	path, err := CharacterImagePath()
 	require.NoError(t, err)
 	got, err := os.ReadFile(path)
 	require.NoError(t, err)
 	assert.Equal(t, payload, got)
-}
-
-func itoaForTest(n int) string {
-	// Tiny local helper to keep the test names readable without pulling
-	// strconv into the test file's import set.
-	if n == 0 {
-		return "0"
-	}
-	var buf [4]byte
-	i := len(buf)
-	for n > 0 {
-		i--
-		buf[i] = byte('0' + n%10)
-		n /= 10
-	}
-	return string(buf[i:])
 }

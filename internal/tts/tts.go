@@ -1,9 +1,8 @@
-package main
+package tts
 
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +10,12 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"diesel/internal/audio"
+	"diesel/internal/settings"
+	"diesel/internal/tracing"
+	"diesel/internal/util"
+	"diesel/internal/wav"
 
 	qt "github.com/mappu/miqt/qt6"
 	mm "github.com/mappu/miqt/qt6/multimedia"
@@ -27,7 +32,7 @@ const (
 	ttsDefaultVoice = "alloy"
 )
 
-// synthesizeTTS POSTs `text` to `<endpoint>/audio/speech` and returns the
+// Synthesize POSTs `text` to `<endpoint>/audio/speech` and returns the
 // raw audio bytes the server produced. The OpenAI Audio API contract is
 // what we target — Speaches, KokoroTTS-shim, and OpenAI itself all serve
 // the same shape, so we don't need a per-provider switch.
@@ -37,21 +42,21 @@ const (
 // and the resulting "silent playback" is the kind of bug that's hard to
 // tell from a misconfiguration. With WAV we parse the header ourselves
 // and feed raw PCM to QAudioSink — predictable end-to-end.
-func synthesizeTTS(ctx context.Context, endpoint, apiKey, model, voice, text string) ([]byte, error) {
+func Synthesize(ctx context.Context, endpoint, apiKey, model, voice, text string) ([]byte, error) {
 	if model = strings.TrimSpace(model); model == "" {
 		model = ttsDefaultModel
 	}
 	if voice = strings.TrimSpace(voice); voice == "" {
 		voice = ttsDefaultVoice
 	}
-	ctx, span := startSpan(ctx, "tts.synthesize",
+	ctx, span := tracing.StartSpan(ctx, "tts.synthesize",
 		attribute.String("tts.model", model),
 		attribute.String("tts.voice", voice),
 		attribute.Int("tts.text.length", len(text)),
 	)
 	defer span.End()
 
-	endpoint = normalizeEndpoint(endpoint)
+	endpoint = util.NormalizeEndpoint(endpoint)
 	if endpoint == "" {
 		err := errors.New("no TTS endpoint configured")
 		span.SetStatus(codes.Error, err.Error())
@@ -88,7 +93,7 @@ func synthesizeTTS(ctx context.Context, endpoint, apiKey, model, voice, text str
 	// 60 s is plenty for a 1–2 sentence reply on a local server; longer
 	// completions are rare in this UI because the system prompt caps
 	// Diesel at 3 sentences.
-	client := tracedHTTPClient(60 * time.Second)
+	client := tracing.HTTPClient(60 * time.Second)
 	resp, err := client.Do(req)
 	if err != nil {
 		span.RecordError(err)
@@ -97,82 +102,24 @@ func synthesizeTTS(ctx context.Context, endpoint, apiKey, model, voice, text str
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		err := httpStatusError(resp, 512)
+		err := util.HTTPStatusError(resp, 512)
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
-	audio, err := io.ReadAll(resp.Body)
+	audioBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
-	span.SetAttributes(attribute.Int("tts.audio.bytes", len(audio)))
-	return audio, nil
+	span.SetAttributes(attribute.Int("tts.audio.bytes", len(audioBytes)))
+	return audioBytes, nil
 }
 
-// wavInfo is what we pull out of a WAV header to drive QAudioSink:
-// enough to construct a QAudioFormat plus a slice pointing at the raw
-// PCM payload (which we hand to QBuffer untouched).
-type wavInfo struct {
-	sampleRate    int
-	channels      int
-	bitsPerSample int
-	pcm           []byte
-}
-
-// parseWAV walks the RIFF chunks until it finds fmt and data. Tolerant
-// of optional chunks (LIST, INFO, JUNK, …) that some encoders insert
-// between fmt and data — those are skipped over by their declared
-// size. Only PCM (format tag 1) is supported, which is what Speaches
-// and OpenAI's TTS both emit when response_format is "wav".
-func parseWAV(b []byte) (wavInfo, error) {
-	var w wavInfo
-	if len(b) < 12 || string(b[0:4]) != "RIFF" || string(b[8:12]) != "WAVE" {
-		return w, errors.New("not a WAV file")
-	}
-	pos := 12
-	foundFmt := false
-	for pos+8 <= len(b) {
-		tag := string(b[pos : pos+4])
-		size := int(binary.LittleEndian.Uint32(b[pos+4 : pos+8]))
-		pos += 8
-		if size < 0 || pos+size > len(b) {
-			return w, errors.New("truncated WAV chunk")
-		}
-		chunk := b[pos : pos+size]
-		switch tag {
-		case "fmt ":
-			if size < 16 {
-				return w, errors.New("short fmt chunk")
-			}
-			if formatTag := binary.LittleEndian.Uint16(chunk[0:2]); formatTag != 1 {
-				return w, fmt.Errorf("unsupported WAV format tag %d (need PCM)", formatTag)
-			}
-			w.channels = int(binary.LittleEndian.Uint16(chunk[2:4]))
-			w.sampleRate = int(binary.LittleEndian.Uint32(chunk[4:8]))
-			w.bitsPerSample = int(binary.LittleEndian.Uint16(chunk[14:16]))
-			foundFmt = true
-		case "data":
-			if !foundFmt {
-				return w, errors.New("WAV data before fmt")
-			}
-			w.pcm = chunk
-			return w, nil
-		}
-		// RIFF chunks are padded to even length.
-		pos += size
-		if size%2 == 1 && pos < len(b) {
-			pos++
-		}
-	}
-	return w, errors.New("no data chunk in WAV")
-}
-
-// sampleFormatFor returns the QAudioFormat sample-format for a given
-// WAV bit depth. WAV PCM can be 8-bit unsigned or N-bit signed for
-// N ≥ 16 — Qt's sample-format enum mirrors that asymmetry.
+// sampleFormatFor returns the QAudioFormat sample-format for a given WAV
+// bit depth. WAV PCM can be 8-bit unsigned or N-bit signed for N ≥ 16 —
+// Qt's sample-format enum mirrors that asymmetry.
 func sampleFormatFor(bits int) (mm.QAudioFormat__SampleFormat, error) {
 	switch bits {
 	case 8:
@@ -185,69 +132,69 @@ func sampleFormatFor(bits int) (mm.QAudioFormat__SampleFormat, error) {
 	return mm.QAudioFormat__Unknown, fmt.Errorf("unsupported bit depth: %d", bits)
 }
 
-// speaker owns a single in-flight playback. The Go GC must not collect
+// Speaker owns a single in-flight playback. The Go GC must not collect
 // any of these fields while the sink is still draining the buffer —
 // QAudioSink reads from buffer.QIODevice asynchronously, so all three
 // have to stay alive until cleanup() runs.
-type speaker struct {
+type Speaker struct {
 	sink   *mm.QAudioSink
 	buffer *qt.QBuffer
 	format *mm.QAudioFormat
 	done   bool
-	// onDone, if set, fires exactly once when playback ends on its own
-	// (the buffer drained) — *not* when stop() cancels it early.
+	// OnDone, if set, fires exactly once when playback ends on its own
+	// (the buffer drained) — *not* when Stop cancels it early.
 	// Continuous-conversation mode hangs the next recording off this so
 	// the mic only reopens after Diesel has actually finished speaking.
-	onDone func()
+	OnDone func()
 	// naturalEnd records whether we passed through IdleState (buffer
-	// exhausted) before stopping. An explicit stop() jumps straight to
-	// StoppedState, so this stays false and onDone is suppressed.
+	// exhausted) before stopping. An explicit Stop jumps straight to
+	// StoppedState, so this stays false and OnDone is suppressed.
 	naturalEnd bool
-	// span tracks the playback lifetime — started in playAudio after the
+	// span tracks the playback lifetime — started in Play after the
 	// WAV decode succeeds, ended in cleanup() with the natural_end flag.
 	span      trace.Span
 	startedAt time.Time
 }
 
-// playAudio decodes a WAV blob and streams its PCM through QAudioSink
-// using a QBuffer as the pull-mode source device. Format selection
-// comes from the WAV header rather than being hardcoded: Speaches
-// emits Kokoro at 24 kHz, OpenAI's tts-1 at 24 kHz, Piper varies by
-// voice — we just play what the server gave us.
+// Play decodes a WAV blob and streams its PCM through QAudioSink using a
+// QBuffer as the pull-mode source device. Format selection comes from
+// the WAV header rather than being hardcoded: Speaches emits Kokoro at
+// 24 kHz, OpenAI's tts-1 at 24 kHz, Piper varies by voice — we just play
+// what the server gave us.
 //
-// Returns a speaker whose stop() cancels playback early; otherwise the
+// Returns a Speaker whose Stop cancels playback early; otherwise the
 // sink tears itself down when the buffer reaches IdleState (data
 // exhausted).
-func playAudio(ctx context.Context, audio []byte) (*speaker, error) {
-	_, span := startSpan(ctx, "tts.play",
-		attribute.Int("tts.audio.bytes", len(audio)),
+func Play(ctx context.Context, audioBytes []byte) (*Speaker, error) {
+	_, span := tracing.StartSpan(ctx, "tts.play",
+		attribute.Int("tts.audio.bytes", len(audioBytes)),
 	)
-	if len(audio) == 0 {
+	if len(audioBytes) == 0 {
 		err := errors.New("no audio to play")
 		span.SetStatus(codes.Error, err.Error())
 		span.End()
 		return nil, err
 	}
-	info, err := parseWAV(audio)
+	info, err := wav.Parse(audioBytes)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		span.End()
 		return nil, fmt.Errorf("decode WAV: %w", err)
 	}
-	if info.sampleRate <= 0 || info.channels <= 0 || len(info.pcm) == 0 {
+	if info.SampleRate <= 0 || info.Channels <= 0 || len(info.PCM) == 0 {
 		err := errors.New("WAV header missing required fields")
 		span.SetStatus(codes.Error, err.Error())
 		span.End()
 		return nil, err
 	}
 	span.SetAttributes(
-		attribute.Int("tts.play.sample_rate", info.sampleRate),
-		attribute.Int("tts.play.channels", info.channels),
-		attribute.Int("tts.play.bits_per_sample", info.bitsPerSample),
-		attribute.Int("tts.play.pcm_bytes", len(info.pcm)),
+		attribute.Int("tts.play.sample_rate", info.SampleRate),
+		attribute.Int("tts.play.channels", info.Channels),
+		attribute.Int("tts.play.bits_per_sample", info.BitsPerSample),
+		attribute.Int("tts.play.pcm_bytes", len(info.PCM)),
 	)
-	sampleFmt, err := sampleFormatFor(info.bitsPerSample)
+	sampleFmt, err := sampleFormatFor(info.BitsPerSample)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
@@ -256,11 +203,11 @@ func playAudio(ctx context.Context, audio []byte) (*speaker, error) {
 	}
 
 	format := mm.NewQAudioFormat()
-	format.SetSampleRate(info.sampleRate)
-	format.SetChannelCount(info.channels)
+	format.SetSampleRate(info.SampleRate)
+	format.SetChannelCount(info.Channels)
 	format.SetSampleFormat(sampleFmt)
 
-	dev := pickOutputDevice(loadSettings().OutputDevice)
+	dev := audio.PickOutputDevice(settings.Load().OutputDevice)
 	if dev == nil {
 		err := errors.New("no audio output device available")
 		span.SetStatus(codes.Error, err.Error())
@@ -269,7 +216,7 @@ func playAudio(ctx context.Context, audio []byte) (*speaker, error) {
 	}
 
 	buf := qt.NewQBuffer()
-	buf.SetData(info.pcm)
+	buf.SetData(info.PCM)
 	if !buf.Open(qt.QIODeviceBase__ReadOnly) {
 		err := errors.New("could not open audio buffer")
 		span.SetStatus(codes.Error, err.Error())
@@ -278,7 +225,7 @@ func playAudio(ctx context.Context, audio []byte) (*speaker, error) {
 	}
 
 	sink := mm.NewQAudioSink5(dev, format)
-	s := &speaker{sink: sink, buffer: buf, format: format, span: span, startedAt: time.Now()}
+	s := &Speaker{sink: sink, buffer: buf, format: format, span: span, startedAt: time.Now()}
 	// QAudioSink's state machine has a subtlety: when the source device
 	// returns 0 bytes (buffer drained) the sink transitions to
 	// IdleState but stays "active" and keeps polling for more data. If
@@ -299,11 +246,11 @@ func playAudio(ctx context.Context, audio []byte) (*speaker, error) {
 	return s, nil
 }
 
-// stop halts playback immediately. Safe to call from anywhere on the Qt
+// Stop halts playback immediately. Safe to call from anywhere on the Qt
 // main thread, including before play has actually started or after it
 // already finished — cleanup is idempotent and runs from the state
 // change the Stop() call triggers.
-func (s *speaker) stop() {
+func (s *Speaker) Stop() {
 	if s == nil || s.done {
 		return
 	}
@@ -314,8 +261,8 @@ func (s *speaker) stop() {
 
 // cleanup runs once the sink reaches Idle or Stopped. Closes the buffer
 // (which signals "no more data" to Qt) and marks the speaker done so a
-// follow-up stop() is a no-op.
-func (s *speaker) cleanup() {
+// follow-up Stop is a no-op.
+func (s *Speaker) cleanup() {
 	if s.done {
 		return
 	}
@@ -331,9 +278,9 @@ func (s *speaker) cleanup() {
 		s.span.End()
 	}
 	// Only chain onward when playback drained on its own — an explicit
-	// stop() (user reached for the mic, or a newer reply replaced this
+	// Stop (user reached for the mic, or a newer reply replaced this
 	// one) means the continuous loop should not fire here.
-	if s.naturalEnd && s.onDone != nil {
-		s.onDone()
+	if s.naturalEnd && s.OnDone != nil {
+		s.OnDone()
 	}
 }

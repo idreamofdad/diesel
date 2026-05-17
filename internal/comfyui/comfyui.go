@@ -1,4 +1,4 @@
-package main
+package comfyui
 
 import (
 	"bytes"
@@ -19,6 +19,10 @@ import (
 	"strings"
 	"time"
 
+	"diesel/internal/settings"
+	"diesel/internal/tracing"
+	"diesel/internal/util"
+
 	"github.com/coder/websocket"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -29,8 +33,8 @@ import (
 // {id: {class_type, inputs}} shape the /prompt endpoint accepts, not the
 // editor's UI-graph export). It's compiled into the binary at build time
 // so there are no extra files to ship. The checkpoint — and every other
-// model — is baked into the JSON; generateImage parses a fresh copy per
-// call and rewrites only the prompt text and seed.
+// model — is baked into the JSON; Generate parses a fresh copy per call
+// and rewrites only the prompt text and seed.
 //
 //go:embed default_workflow.json
 var defaultWorkflow string
@@ -130,16 +134,16 @@ func setConnectedText(graph map[string]workflowNode, sampler workflowNode, key, 
 	return nil
 }
 
-// imageProgress is one update from a streaming render. Either Total > 0
-// (a step counter) or Preview is non-empty (an intermediate frame). The
+// Progress is one update from a streaming render. Either Total > 0 (a
+// step counter) or Preview is non-empty (an intermediate frame). The
 // caller decides what to do with each — typically: step → progress bar,
 // preview → portrait panel.
-type imageProgress struct {
+type Progress struct {
 	Step, Total int
 	Preview     []byte
 }
 
-// generateImage runs the bundled workflow on the configured ComfyUI server
+// Generate runs the bundled workflow on the configured ComfyUI server
 // and returns the rendered PNG bytes. It blocks until the render finishes
 // or the deadline passes — callers should run it off the UI thread, using
 // the same goroutine + QTimer-poll pattern the chat and TTS paths use.
@@ -147,16 +151,16 @@ type imageProgress struct {
 // onProgress (when non-nil) receives a stream of updates over the
 // ComfyUI WebSocket: step counters from the "progress" event and
 // intermediate preview frames as binary messages. It runs on the
-// goroutine driving generateImage, so a Qt-thread caller should funnel
+// goroutine driving Generate, so a Qt-thread caller should funnel
 // updates through a channel.
-func generateImage(ctx context.Context, s AppSettings, positive, negative string, onProgress func(imageProgress)) ([]byte, error) {
-	ctx, span := startSpan(ctx, "image.generate",
+func Generate(ctx context.Context, s settings.AppSettings, positive, negative string, onProgress func(Progress)) ([]byte, error) {
+	ctx, span := tracing.StartSpan(ctx, "image.generate",
 		attribute.Int("image.prompt.length", len(positive)),
 		attribute.Int("image.negative_prompt.length", len(negative)),
 	)
 	defer span.End()
 
-	endpoint := normalizeEndpoint(s.ComfyUIEndpoint)
+	endpoint := util.NormalizeEndpoint(s.ComfyUIEndpoint)
 	if endpoint == "" {
 		err := errors.New("no ComfyUI endpoint configured")
 		span.SetStatus(codes.Error, err.Error())
@@ -174,7 +178,7 @@ func generateImage(ctx context.Context, s AppSettings, positive, negative string
 	// when the workflow JSON grows large or the rewriter fails to find a
 	// sampler, the timing/error lands here instead of getting hidden
 	// inside image.generate.
-	rewriteCtx, rewriteSpan := startSpan(ctx, "image.workflow.rewrite",
+	rewriteCtx, rewriteSpan := tracing.StartSpan(ctx, "image.workflow.rewrite",
 		attribute.Int("workflow.json.bytes", len(defaultWorkflow)),
 	)
 	var graph map[string]workflowNode
@@ -228,7 +232,7 @@ func generateImage(ctx context.Context, s AppSettings, positive, negative string
 	conn.SetReadLimit(8 << 20)
 
 	// Queue the job.
-	httpClient := tracedHTTPClient(30 * time.Second)
+	httpClient := tracing.HTTPClient(30 * time.Second)
 	reqBody, err := json.Marshal(map[string]any{
 		"prompt":    graph,
 		"client_id": clientID,
@@ -312,7 +316,7 @@ func generateImage(ctx context.Context, s AppSettings, positive, negative string
 						attribute.Int("total", p.Max),
 					))
 					if onProgress != nil {
-						onProgress(imageProgress{Step: p.Value, Total: p.Max})
+						onProgress(Progress{Step: p.Value, Total: p.Max})
 					}
 				}
 			case "executed":
@@ -388,7 +392,7 @@ func generateImage(ctx context.Context, s AppSettings, positive, negative string
 			if len(data) >= 8 && onProgress != nil {
 				if binary.BigEndian.Uint32(data[0:4]) == 1 {
 					previewCount++
-					onProgress(imageProgress{Preview: data[8:]})
+					onProgress(Progress{Preview: data[8:]})
 				}
 			}
 		}
@@ -401,7 +405,7 @@ func generateImage(ctx context.Context, s AppSettings, positive, negative string
 func decodePromptID(resp *http.Response) (string, error) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", httpStatusError(resp, 8192)
+		return "", util.HTTPStatusError(resp, 8192)
 	}
 	var payload struct {
 		PromptID string `json:"prompt_id"`
@@ -444,7 +448,7 @@ func wsURLFor(endpoint, clientID string) string {
 
 // fetchImage downloads a rendered image from ComfyUI's /view endpoint.
 func fetchImage(ctx context.Context, client *http.Client, endpoint string, ref imageRef) ([]byte, error) {
-	ctx, span := startSpan(ctx, "image.fetch",
+	ctx, span := tracing.StartSpan(ctx, "image.fetch",
 		attribute.String("image.filename", ref.Filename),
 		attribute.String("image.subfolder", ref.Subfolder),
 		attribute.String("image.type", ref.Type),
@@ -483,23 +487,23 @@ func fetchImage(ctx context.Context, client *http.Client, endpoint string, ref i
 	return body, nil
 }
 
-// fetchComfyUICheckpoints lists the checkpoint files the server can load,
-// for the settings dialog's model dropdown. ComfyUI describes every node's
+// FetchCheckpoints lists the checkpoint files the server can load, for
+// the settings dialog's model dropdown. ComfyUI describes every node's
 // inputs via /object_info; CheckpointLoaderSimple's ckpt_name input is a
 // tuple whose first element is the list of available checkpoints.
-func fetchComfyUICheckpoints(endpoint string) ([]string, error) {
-	endpoint = normalizeEndpoint(endpoint)
+func FetchCheckpoints(endpoint string) ([]string, error) {
+	endpoint = util.NormalizeEndpoint(endpoint)
 	if endpoint == "" {
 		return nil, errors.New("no endpoint configured")
 	}
-	client := tracedHTTPClient(6 * time.Second)
+	client := tracing.HTTPClient(6 * time.Second)
 	resp, err := client.Get(endpoint + "/object_info/CheckpointLoaderSimple")
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, httpStatusError(resp, 512)
+		return nil, util.HTTPStatusError(resp, 512)
 	}
 	var payload map[string]struct {
 		Input struct {
@@ -526,16 +530,16 @@ func fetchComfyUICheckpoints(endpoint string) ([]string, error) {
 	return names, nil
 }
 
-// testComfyUIConnection probes the endpoint for the settings dialog. It
-// hits /system_stats (cheap, always present) to confirm reachability, then
+// TestConnection probes the endpoint for the settings dialog. It hits
+// /system_stats (cheap, always present) to confirm reachability, then
 // reports how many checkpoints are installed so the user knows the model
 // dropdown will have something in it.
-func testComfyUIConnection(endpoint string) string {
-	endpoint = normalizeEndpoint(endpoint)
+func TestConnection(endpoint string) string {
+	endpoint = util.NormalizeEndpoint(endpoint)
 	if endpoint == "" {
 		return "✗ No endpoint configured."
 	}
-	client := tracedHTTPClient(6 * time.Second)
+	client := tracing.HTTPClient(6 * time.Second)
 	resp, err := client.Get(endpoint + "/system_stats")
 	if err != nil {
 		return "✗ " + err.Error()
@@ -544,7 +548,7 @@ func testComfyUIConnection(endpoint string) string {
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Sprintf("✗ HTTP %d", resp.StatusCode)
 	}
-	ckpts, err := fetchComfyUICheckpoints(endpoint)
+	ckpts, err := FetchCheckpoints(endpoint)
 	if err != nil {
 		return "✓ Connected, but couldn't list checkpoints: " + err.Error()
 	}
@@ -577,18 +581,18 @@ func randomHex(n int) string {
 	return hex.EncodeToString(b)
 }
 
-// characterImagePath is where the most recent rendered portrait is cached,
+// CharacterImagePath is where the most recent rendered portrait is cached,
 // a sibling of settings.json and conversation.json. Restored on launch so
 // the window opens with Diesel's face already in place.
-func characterImagePath() (string, error) {
-	return configFilePath("character.png")
+func CharacterImagePath() (string, error) {
+	return util.ConfigFilePath("character.png")
 }
 
-// saveCharacterImage caches `png` to characterImagePath.
-func saveCharacterImage(png []byte) error {
-	path, err := characterImagePath()
+// SaveCharacterImage caches `png` to CharacterImagePath.
+func SaveCharacterImage(png []byte) error {
+	path, err := CharacterImagePath()
 	if err != nil {
 		return err
 	}
-	return atomicWriteFile(path, png, 0o644)
+	return util.AtomicWriteFile(path, png, 0o644)
 }

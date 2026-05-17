@@ -1,4 +1,4 @@
-package main
+package util
 
 import (
 	"net/http"
@@ -26,7 +26,7 @@ func TestNormalizeEndpoint(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, normalizeEndpoint(tc.in))
+			assert.Equal(t, tc.want, NormalizeEndpoint(tc.in))
 		})
 	}
 }
@@ -44,13 +44,13 @@ func TestFirstNonEmpty(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, firstNonEmpty(tc.specific, tc.fallback))
+			assert.Equal(t, tc.want, FirstNonEmpty(tc.specific, tc.fallback))
 		})
 	}
 }
 
 func TestConfigFilePath(t *testing.T) {
-	got, err := configFilePath("foo.json")
+	got, err := ConfigFilePath("foo.json")
 	require.NoError(t, err)
 	assert.True(t, strings.HasSuffix(got, filepath.Join("diesel", "foo.json")),
 		"path %q should end with diesel/foo.json", got)
@@ -61,7 +61,7 @@ func TestAtomicWriteFile_CreatesFileAndParents(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "nested", "deeper", "out.txt")
 
-	err := atomicWriteFile(target, []byte("hello"), 0o600)
+	err := AtomicWriteFile(target, []byte("hello"), 0o600)
 	require.NoError(t, err)
 
 	got, err := os.ReadFile(target)
@@ -86,7 +86,7 @@ func TestAtomicWriteFile_OverwritesExisting(t *testing.T) {
 	target := filepath.Join(dir, "file.txt")
 	require.NoError(t, os.WriteFile(target, []byte("old"), 0o600))
 
-	require.NoError(t, atomicWriteFile(target, []byte("new"), 0o600))
+	require.NoError(t, AtomicWriteFile(target, []byte("new"), 0o600))
 
 	got, err := os.ReadFile(target)
 	require.NoError(t, err)
@@ -132,9 +132,6 @@ func TestHttpStatusError(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			// httpStatusError pulls from resp.Body — easiest to drive via
-			// a real httptest response. Direct construction works too,
-			// but this exercises the io.LimitReader path end-to-end.
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(tc.status)
 				_, _ = w.Write([]byte(tc.body))
@@ -145,10 +142,9 @@ func TestHttpStatusError(t *testing.T) {
 			require.NoError(t, err)
 			t.Cleanup(func() { resp.Body.Close() })
 
-			err = httpStatusError(resp, tc.snippet)
+			err = HTTPStatusError(resp, tc.snippet)
 			require.Error(t, err)
 			assert.Equal(t, tc.wantMatch, err.Error())
 		})
 	}
 }
-

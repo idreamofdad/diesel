@@ -1,4 +1,4 @@
-package main
+package audio
 
 import (
 	"bytes"
@@ -12,6 +12,11 @@ import (
 	"strings"
 	"time"
 
+	"diesel/internal/settings"
+	"diesel/internal/tracing"
+	"diesel/internal/util"
+	"diesel/internal/wav"
+
 	qt "github.com/mappu/miqt/qt6"
 	mm "github.com/mappu/miqt/qt6/multimedia"
 	"go.opentelemetry.io/otel/attribute"
@@ -23,10 +28,11 @@ import (
 // mono PCM is what Whisper runs at internally, so we sidestep an extra
 // resample step on the server side and keep the upload tiny (~32 kB/s).
 const (
-	sttSampleRate   = 16000
-	sttBytesPerSamp = 2 // signed int16, little-endian
-	sttChannels     = 1
-	sttDefaultModel = "whisper-1" // OpenAI-compatible default
+	sttSampleRate    = 16000
+	sttBitsPerSample = 16
+	sttBytesPerSamp  = sttBitsPerSample / 8 // signed int16, little-endian
+	sttChannels      = 1
+	sttDefaultModel  = "whisper-1" // OpenAI-compatible default
 )
 
 // VAD tuning. The thresholds are RMS amplitude over a 30 ms frame of
@@ -43,45 +49,45 @@ const (
 	vadMaxDurationMS = 30000
 )
 
-// stopReason classifies why a recording ended, so the caller can decide
+// StopReason classifies why a recording ended, so the caller can decide
 // whether to send the audio onward (VAD/max-length), warn the user
 // (no-speech), or quietly drop it (cancelled).
-type stopReason int
+type StopReason int
 
 const (
-	stopVAD       stopReason = iota // VAD detected trailing silence
-	stopMaxLength                   // hard duration ceiling hit
-	stopCancelled                   // user pressed record again — discard audio
-	stopCommitted                   // user pressed the commit/send button — transcribe
-	stopNoSpeech                    // we never crossed the start threshold
+	StopVAD       StopReason = iota // VAD detected trailing silence
+	StopMaxLength                   // hard duration ceiling hit
+	StopCancelled                   // user pressed record again — discard audio
+	StopCommitted                   // user pressed the commit/send button — transcribe
+	StopNoSpeech                    // we never crossed the start threshold
 )
 
 // String returns a stable, human-readable label for the stop reason. Used as
 // the `stt.record.reason` span attribute so trace consumers can filter by
 // outcome without having to memorize the int constants.
-func (r stopReason) String() string {
+func (r StopReason) String() string {
 	switch r {
-	case stopVAD:
+	case StopVAD:
 		return "vad"
-	case stopMaxLength:
+	case StopMaxLength:
 		return "max_length"
-	case stopCancelled:
+	case StopCancelled:
 		return "cancelled"
-	case stopCommitted:
+	case StopCommitted:
 		return "committed"
-	case stopNoSpeech:
+	case StopNoSpeech:
 		return "no_speech"
 	}
 	return "unknown"
 }
 
-// recorder holds the state of an in-progress capture. It is created on
-// the main Qt thread by startRecording and lives until stop() fires its
+// Recorder holds the state of an in-progress capture. It is created on
+// the main Qt thread by StartRecording and lives until Stop fires its
 // onStop callback exactly once.
 //
 // All methods must be called from the Qt main thread — the OnReadyRead
 // signal fires there, and we read mutable state without a lock.
-type recorder struct {
+type Recorder struct {
 	source   *mm.QAudioSource
 	io       *qt.QIODevice
 	buf      bytes.Buffer // raw int16 LE PCM
@@ -94,20 +100,20 @@ type recorder struct {
 	done            bool
 
 	// span tracks the recording lifecycle for tracing — created in
-	// startRecording, ended in stop with the final reason / byte count
+	// StartRecording, ended in Stop with the final reason / byte count
 	// attached. Always non-nil; falls back to a no-op span when tracing
 	// is disabled.
 	span trace.Span
 
 	// onStop fires once, with the captured PCM and the reason we stopped.
-	onStop func(pcm []byte, reason stopReason)
+	onStop func(pcm []byte, reason StopReason)
 }
 
-// startRecording opens the default audio input at 16 kHz mono Int16 and
+// StartRecording opens the default audio input at 16 kHz mono Int16 and
 // streams samples through an energy-based VAD. Returns the recorder so
 // the caller can manually stop it; onStop fires on the Qt main thread.
-func startRecording(ctx context.Context, onStop func([]byte, stopReason)) (*recorder, error) {
-	_, span := startSpan(ctx, "stt.record",
+func StartRecording(ctx context.Context, onStop func([]byte, StopReason)) (*Recorder, error) {
+	_, span := tracing.StartSpan(ctx, "stt.record",
 		attribute.Int("stt.sample_rate", sttSampleRate),
 		attribute.Int("stt.channels", sttChannels),
 	)
@@ -117,7 +123,7 @@ func startRecording(ctx context.Context, onStop func([]byte, stopReason)) (*reco
 	format.SetChannelCount(sttChannels)
 	format.SetSampleFormat(mm.QAudioFormat__Int16)
 
-	dev := pickInputDevice(loadSettings().InputDevice)
+	dev := PickInputDevice(settings.Load().InputDevice)
 	if dev == nil {
 		err := errors.New("no audio input device available")
 		span.RecordError(err)
@@ -136,7 +142,7 @@ func startRecording(ctx context.Context, onStop func([]byte, stopReason)) (*reco
 		return nil, err
 	}
 
-	r := &recorder{
+	r := &Recorder{
 		source:    src,
 		io:        iodev,
 		onStop:    onStop,
@@ -160,14 +166,14 @@ func deviceDescriptions(devs []mm.QAudioDevice) []string {
 	return out
 }
 
-// audioInputDescriptions lists the human-readable names of every input
-// device Qt sees, in the order the platform returns them.
-func audioInputDescriptions() []string {
+// InputDescriptions lists the human-readable names of every input device
+// Qt sees, in the order the platform returns them.
+func InputDescriptions() []string {
 	return deviceDescriptions(mm.QMediaDevices_AudioInputs())
 }
 
-// audioOutputDescriptions mirrors audioInputDescriptions for outputs.
-func audioOutputDescriptions() []string {
+// OutputDescriptions mirrors InputDescriptions for outputs.
+func OutputDescriptions() []string {
 	return deviceDescriptions(mm.QMediaDevices_AudioOutputs())
 }
 
@@ -188,21 +194,21 @@ func resolveAudioDevice(saved string, devs []mm.QAudioDevice, defaultDevice func
 	return defaultDevice()
 }
 
-// pickInputDevice resolves the saved input-device description against the
+// PickInputDevice resolves the saved input-device description against the
 // current list of inputs.
-func pickInputDevice(saved string) *mm.QAudioDevice {
+func PickInputDevice(saved string) *mm.QAudioDevice {
 	return resolveAudioDevice(saved, mm.QMediaDevices_AudioInputs(), mm.QMediaDevices_DefaultAudioInput)
 }
 
-// pickOutputDevice mirrors pickInputDevice for playback devices.
-func pickOutputDevice(saved string) *mm.QAudioDevice {
+// PickOutputDevice mirrors PickInputDevice for playback devices.
+func PickOutputDevice(saved string) *mm.QAudioDevice {
 	return resolveAudioDevice(saved, mm.QMediaDevices_AudioOutputs(), mm.QMediaDevices_DefaultAudioOutput)
 }
 
 // consume drains whatever Qt has buffered, appends it to the PCM buffer,
 // and runs the VAD state machine. Partial frames are carried over so
 // every RMS computation is over a clean 30 ms window.
-func (r *recorder) consume() {
+func (r *Recorder) consume() {
 	if r.done {
 		return
 	}
@@ -230,18 +236,18 @@ func (r *recorder) consume() {
 	now := time.Now()
 	switch {
 	case now.Sub(r.startedAt) > vadMaxDurationMS*time.Millisecond:
-		r.stop(stopMaxLength)
+		r.Stop(StopMaxLength)
 	case r.hasVoice &&
 		now.Sub(r.speechStartedAt) > vadMinSpeechMS*time.Millisecond &&
 		now.Sub(r.lastVoiceAt) > vadSilenceMS*time.Millisecond:
-		r.stop(stopVAD)
+		r.Stop(StopVAD)
 	}
 }
 
-// stop halts the audio source, drains any tail samples Qt buffered while
+// Stop halts the audio source, drains any tail samples Qt buffered while
 // we were processing, and fires onStop exactly once. Safe to call from
 // either the VAD path (consume) or a user cancel.
-func (r *recorder) stop(reason stopReason) {
+func (r *Recorder) Stop(reason StopReason) {
 	if r.done {
 		return
 	}
@@ -254,8 +260,8 @@ func (r *recorder) stop(reason stopReason) {
 			r.buf.Write(tail)
 		}
 	}
-	if !r.hasVoice && reason != stopCancelled {
-		reason = stopNoSpeech
+	if !r.hasVoice && reason != StopCancelled {
+		reason = StopNoSpeech
 	}
 	if r.span != nil {
 		r.span.SetAttributes(
@@ -286,50 +292,28 @@ func frameRMS(frame []byte) float64 {
 	return math.Sqrt(sumSquares / float64(n))
 }
 
-// encodeWAV wraps a PCM Int16 mono buffer in a 44-byte WAV/RIFF header.
-// The receiving STT server can then decode it without us declaring the
-// audio format out of band. All sizes are fixed because we control the
-// capture format.
-func encodeWAV(pcm []byte) []byte {
-	const (
-		bitsPerSample = 16
-		byteRate      = sttSampleRate * sttChannels * bitsPerSample / 8
-		blockAlign    = sttChannels * bitsPerSample / 8
-	)
-	var buf bytes.Buffer
-	w := func(v any) { _ = binary.Write(&buf, binary.LittleEndian, v) }
-	buf.WriteString("RIFF")
-	w(uint32(36 + len(pcm)))
-	buf.WriteString("WAVE")
-	buf.WriteString("fmt ")
-	w(uint32(16)) // PCM fmt-chunk size
-	w(uint16(1))  // PCM format tag
-	w(uint16(sttChannels))
-	w(uint32(sttSampleRate))
-	w(uint32(byteRate))
-	w(uint16(blockAlign))
-	w(uint16(bitsPerSample))
-	buf.WriteString("data")
-	w(uint32(len(pcm)))
-	buf.Write(pcm)
-	return buf.Bytes()
+// EncodeWAV wraps the recorder's PCM buffer in a WAV header so the STT
+// server can decode it without the format being declared out of band.
+// Format is fixed to whatever the recorder captured (16 kHz mono 16-bit).
+func EncodeWAV(pcm []byte) []byte {
+	return wav.Encode(pcm, sttSampleRate, sttChannels, sttBitsPerSample)
 }
 
-// transcribe POSTs `wav` to `<endpoint>/audio/transcriptions` as
+// Transcribe POSTs `wavData` to `<endpoint>/audio/transcriptions` as
 // multipart/form-data, following the OpenAI Whisper API contract.
 // Speaches, faster-whisper-server, and OpenAI itself implement the same
 // shape, which is why we don't need a per-provider switch here.
-func transcribe(ctx context.Context, endpoint, apiKey, model string, wav []byte) (string, error) {
+func Transcribe(ctx context.Context, endpoint, apiKey, model string, wavData []byte) (string, error) {
 	if model = strings.TrimSpace(model); model == "" {
 		model = sttDefaultModel
 	}
-	ctx, span := startSpan(ctx, "stt.transcribe",
+	ctx, span := tracing.StartSpan(ctx, "stt.transcribe",
 		attribute.String("stt.model", model),
-		attribute.Int("stt.audio.bytes", len(wav)),
+		attribute.Int("stt.audio.bytes", len(wavData)),
 	)
 	defer span.End()
 
-	endpoint = normalizeEndpoint(endpoint)
+	endpoint = util.NormalizeEndpoint(endpoint)
 	if endpoint == "" {
 		err := errors.New("no STT endpoint configured")
 		span.SetStatus(codes.Error, err.Error())
@@ -344,7 +328,7 @@ func transcribe(ctx context.Context, endpoint, apiKey, model string, wav []byte)
 		span.SetStatus(codes.Error, err.Error())
 		return "", err
 	}
-	if _, err := part.Write(wav); err != nil {
+	if _, err := part.Write(wavData); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		return "", err
@@ -370,7 +354,7 @@ func transcribe(ctx context.Context, endpoint, apiKey, model string, wav []byte)
 
 	// 2-minute ceiling: a 30 s recording on a slow local server (CPU-only
 	// faster-whisper-large) can take well over a minute to transcribe.
-	client := tracedHTTPClient(2 * time.Minute)
+	client := tracing.HTTPClient(2 * time.Minute)
 	resp, err := client.Do(req)
 	if err != nil {
 		span.RecordError(err)
@@ -379,7 +363,7 @@ func transcribe(ctx context.Context, endpoint, apiKey, model string, wav []byte)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		err := httpStatusError(resp, 512)
+		err := util.HTTPStatusError(resp, 512)
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		return "", err

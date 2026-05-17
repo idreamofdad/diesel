@@ -1,4 +1,4 @@
-package main
+package chat
 
 import (
 	"bytes"
@@ -11,12 +11,16 @@ import (
 	"strings"
 	"time"
 
+	"diesel/internal/settings"
+	"diesel/internal/tracing"
+	"diesel/internal/util"
+
 	qt "github.com/mappu/miqt/qt6"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 )
 
-// appendTurn writes a "<who>: <body>" paragraph to the transcript with the
+// AppendTurn writes a "<who>: <body>" paragraph to the transcript with the
 // speaker label rendered in `color`. Both args are HTML-escaped before
 // formatting and newlines in the body become <br> so multi-line replies
 // keep their line breaks — QTextEdit interprets Append() content as rich
@@ -27,7 +31,7 @@ import (
 // QTextEdit.Append only scrolls when the cursor was already at the end
 // before the append, so without this the view stays pinned to whatever
 // the user last clicked and the latest turn slides off the bottom.
-func appendTurn(transcript *qt.QTextEdit, who, body, color string) {
+func AppendTurn(transcript *qt.QTextEdit, who, body, color string) {
 	safeBody := strings.ReplaceAll(html.EscapeString(body), "\n", "<br>")
 	transcript.Append(fmt.Sprintf(
 		`<span style="color:%s;"><b>%s:</b></span> %s`,
@@ -40,18 +44,18 @@ func appendTurn(transcript *qt.QTextEdit, who, body, color string) {
 // Chat message roles, matching the OpenAI-compatible /chat/completions
 // schema. Defined as constants so the spellings live in one place.
 const (
-	roleSystem    = "system"
-	roleUser      = "user"
-	roleAssistant = "assistant"
+	RoleSystem    = "system"
+	RoleUser      = "user"
+	RoleAssistant = "assistant"
 )
 
-// chatMessage is the wire shape for an OpenAI-compatible /chat/completions
+// Message is the wire shape for an OpenAI-compatible /chat/completions
 // turn. We also keep a slice of these in memory as the conversation log,
 // stamped with the wall-clock time the turn occurred so the model can
 // reason about elapsed time. Timestamp is folded into Content before each
 // request and zeroed on the outgoing copy, so the wire body stays a plain
 // role/content pair.
-type chatMessage struct {
+type Message struct {
 	Role      string    `json:"role"`
 	Content   string    `json:"content"`
 	Timestamp time.Time `json:"timestamp,omitempty"`
@@ -70,44 +74,44 @@ var thinkBlock = regexp.MustCompile(`(?s)<think>.*?</think>\s*`)
 // `[06:58:56]` form some models truncate to.
 var leadingTimestamp = regexp.MustCompile(`^\s*\[(?:\d{4}-\d{2}-\d{2} )?\d{2}:\d{2}:\d{2}(?:\s+\S+)?\]\s*`)
 
-// tokenUsage mirrors the `usage` block OpenAI-compatible servers return on
+// Usage mirrors the `usage` block OpenAI-compatible servers return on
 // /chat/completions. All fields are optional — local servers (LM Studio,
 // llama.cpp, …) sometimes omit it or report 0 — so callers should treat
 // zero values as "unknown" and not as "definitely no tokens".
-type tokenUsage struct {
+type Usage struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`
 	TotalTokens      int `json:"total_tokens"`
 }
 
-// chatReply is the structured shape Diesel asks the model to return on
-// every turn. The text goes to the transcript and TTS; the emotion drives
-// the portrait pipeline (it's appended as an expression to the image
-// prompt). Naked is a per-turn nudity flag the model can raise when it
-// thinks the scene calls for it — the portrait pipeline splices a nudity
-// fragment into the image prompt when true. The JSON tags match the
-// response_format schema below — don't rename either side in isolation.
-type chatReply struct {
+// Reply is the structured shape Diesel asks the model to return on every
+// turn. The text goes to the transcript and TTS; the emotion drives the
+// portrait pipeline (it's appended as an expression to the image prompt).
+// Naked is a per-turn nudity flag the model can raise when it thinks the
+// scene calls for it — the portrait pipeline splices a nudity fragment
+// into the image prompt when true. The JSON tags match the response_format
+// schema below — don't rename either side in isolation.
+type Reply struct {
 	Text    string `json:"text"`
 	Emotion string `json:"emotion"`
 	Naked   bool   `json:"naked"`
 }
 
-// emotions is the closed set the model is constrained to choose from. Each
-// entry must have a matching key in emotionPrompts so the portrait pipeline
-// knows how to render it.
-var emotions = []string{
+// Emotions is the closed set the model is constrained to choose from.
+// Each entry must have a matching key in EmotionPrompts so the portrait
+// pipeline knows how to render it.
+var Emotions = []string{
 	"happy", "sad", "angry", "surprised happy", "surprised shocked", "laughing",
 	"neutral", "amused", "annoyed", "thoughtful", "flirtatious", "horny",
 }
 
-// emotionPrompts maps each emotion to the prompt fragment spliced into the
+// EmotionPrompts maps each emotion to the prompt fragment spliced into the
 // image prompt to steer the portrait's expression. Values are tuned as
 // SD-style comma-separated tag lists rather than bare adjectives so the
 // renderer has concrete features to latch onto (mouth shape, eye state,
 // brow position). An empty value (neutral) skips the splice and renders
 // the base prompt unchanged.
-var emotionPrompts = map[string]string{
+var EmotionPrompts = map[string]string{
 	"happy":             "warm smile, bright eyes, cheerful expression",
 	"sad":               "downturned mouth, sorrowful eyes, slight tear, melancholy expression",
 	"angry":             "furrowed brow, scowl, gritted teeth, angry expression",
@@ -122,53 +126,47 @@ var emotionPrompts = map[string]string{
 	"horny":             "flushed cheeks, half-lidded eyes, parted lips, biting lower lip, aroused expression, smirk",
 }
 
-// nudityPrompt is the default fragment spliced into the image prompt when
-// the structured reply's Naked flag is true. The active value lives in
-// AppSettings.ImageNudityPrompt so the user can retune it from Settings;
-// this constant is just the seed for a fresh install.
-const nudityPrompt = "completely nude, naked, no clothing"
-
-// chatCompletion sends `history` (oldest→newest) to the configured endpoint
+// Completion sends `history` (oldest→newest) to the configured endpoint
 // and returns the assistant's structured reply along with the server-
 // reported token usage (zero-valued struct when the server didn't include
 // one). Reasoning/"thinking" is explicitly disabled via every shape we
 // know of — extra fields a server doesn't understand are ignored by
 // OpenAI-compatible implementations.
 //
-// The request asks for a strict JSON schema (chatReply); LM Studio and
-// OpenAI honor it. Providers that ignore response_format will return plain
-// text, which we treat as the whole `text` with a neutral emotion so the
+// The request asks for a strict JSON schema (Reply); LM Studio and OpenAI
+// honor it. Providers that ignore response_format will return plain text,
+// which we treat as the whole `text` with a neutral emotion so the
 // conversation keeps flowing rather than erroring out.
-func chatCompletion(ctx context.Context, s AppSettings, history []chatMessage) (chatReply, tokenUsage, error) {
-	ctx, span := startSpan(ctx, "llm.chat",
+func Completion(ctx context.Context, s settings.AppSettings, history []Message) (Reply, Usage, error) {
+	ctx, span := tracing.StartSpan(ctx, "llm.chat",
 		attribute.String("llm.model", s.Model),
 		attribute.Int("llm.history.messages", len(history)),
 		attribute.Bool("llm.system_prompt", strings.TrimSpace(s.SystemPrompt) != ""),
 	)
 	defer span.End()
 
-	endpoint := normalizeEndpoint(s.APIEndpoint)
+	endpoint := util.NormalizeEndpoint(s.APIEndpoint)
 	if endpoint == "" {
 		err := fmt.Errorf("no endpoint configured")
 		span.SetStatus(codes.Error, err.Error())
-		return chatReply{}, tokenUsage{}, err
+		return Reply{}, Usage{}, err
 	}
 	if strings.TrimSpace(s.Model) == "" {
 		err := fmt.Errorf("no model configured")
 		span.SetStatus(codes.Error, err.Error())
-		return chatReply{}, tokenUsage{}, err
+		return Reply{}, Usage{}, err
 	}
 
 	// Assemble the outgoing message list: optional system prompt, then the
 	// trailing window of history capped at HistoryMessages turns. The
 	// caller has already appended the latest user message to `history`.
-	msgs := make([]chatMessage, 0, len(history)+2)
-	msgs = append(msgs, chatMessage{
-		Role:    roleSystem,
+	msgs := make([]Message, 0, len(history)+2)
+	msgs = append(msgs, Message{
+		Role:    RoleSystem,
 		Content: "Current date and time: " + time.Now().Format("Monday, January 2, 2006 at 3:04 PM MST"),
 	})
 	if sp := strings.TrimSpace(s.SystemPrompt); sp != "" {
-		msgs = append(msgs, chatMessage{Role: roleSystem, Content: sp})
+		msgs = append(msgs, Message{Role: RoleSystem, Content: sp})
 	}
 	start := 0
 	switch {
@@ -208,7 +206,7 @@ func chatCompletion(ctx context.Context, s AppSettings, history []chatMessage) (
 						"text": map[string]any{"type": "string"},
 						"emotion": map[string]any{
 							"type": "string",
-							"enum": emotions,
+							"enum": Emotions,
 						},
 						"naked": map[string]any{"type": "boolean"},
 					},
@@ -230,14 +228,14 @@ func chatCompletion(ctx context.Context, s AppSettings, history []chatMessage) (
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
-		return chatReply{}, tokenUsage{}, err
+		return Reply{}, Usage{}, err
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", endpoint+"/chat/completions", bytes.NewReader(raw))
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
-		return chatReply{}, tokenUsage{}, err
+		return Reply{}, Usage{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if key := strings.TrimSpace(s.APIKey); key != "" {
@@ -247,20 +245,20 @@ func chatCompletion(ctx context.Context, s AppSettings, history []chatMessage) (
 	// Long ceiling: local servers running a big model on a laptop can take
 	// well over a minute for the first token. We don't stream yet, so the
 	// whole completion has to fit inside this timeout.
-	client := tracedHTTPClient(5 * time.Minute)
+	client := tracing.HTTPClient(5 * time.Minute)
 	resp, err := client.Do(req)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
-		return chatReply{}, tokenUsage{}, err
+		return Reply{}, Usage{}, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		err := httpStatusError(resp, 512)
+		err := util.HTTPStatusError(resp, 512)
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
-		return chatReply{}, tokenUsage{}, err
+		return Reply{}, Usage{}, err
 	}
 
 	var payload struct {
@@ -269,12 +267,12 @@ func chatCompletion(ctx context.Context, s AppSettings, history []chatMessage) (
 				Content string `json:"content"`
 			} `json:"message"`
 		} `json:"choices"`
-		Usage tokenUsage `json:"usage"`
+		Usage Usage `json:"usage"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
-		return chatReply{}, tokenUsage{}, err
+		return Reply{}, Usage{}, err
 	}
 	// Attach the server-reported usage even on the fallback path below —
 	// callers (and span consumers) want the token counts regardless of
@@ -287,7 +285,7 @@ func chatCompletion(ctx context.Context, s AppSettings, history []chatMessage) (
 	if len(payload.Choices) == 0 {
 		err := fmt.Errorf("server returned no choices")
 		span.SetStatus(codes.Error, err.Error())
-		return chatReply{}, tokenUsage{}, err
+		return Reply{}, Usage{}, err
 	}
 	content := strings.TrimSpace(thinkBlock.ReplaceAllString(payload.Choices[0].Message.Content, ""))
 	content = leadingTimestamp.ReplaceAllString(content, "")
@@ -297,14 +295,14 @@ func chatCompletion(ctx context.Context, s AppSettings, history []chatMessage) (
 	// ignored response_format, model refused, content includes prose
 	// around the JSON) we surface the raw text with a neutral emotion so
 	// the chat keeps flowing.
-	var parsed chatReply
+	var parsed Reply
 	if err := json.Unmarshal([]byte(content), &parsed); err != nil || parsed.Text == "" {
 		span.SetAttributes(
 			attribute.Bool("llm.structured_reply", false),
 			attribute.Int("llm.reply.length", len(content)),
 			attribute.String("llm.reply.emotion", "neutral"),
 		)
-		return chatReply{Text: content, Emotion: "neutral"}, payload.Usage, nil
+		return Reply{Text: content, Emotion: "neutral"}, payload.Usage, nil
 	}
 	parsed.Text = leadingTimestamp.ReplaceAllString(parsed.Text, "")
 	if parsed.Emotion == "" {

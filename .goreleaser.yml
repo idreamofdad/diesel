@@ -27,7 +27,7 @@ before:
 
 builds:
   - id: diesel
-    main: .
+    main: ./cmd/diesel
     # Build the Mach-O directly inside the .app skeleton so the archive step
     # naturally captures it at the right path.
     binary: diesel.app/Contents/MacOS/diesel
