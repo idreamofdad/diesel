@@ -1,0 +1,77 @@
+# GoReleaser config for diesel — builds a self-contained macOS .app bundle.
+#
+# The Go binary is compiled with cgo against the Homebrew Qt6 frameworks, then
+# `macdeployqt` is run to copy QtCore/QtGui/QtWidgets + the cocoa platform
+# plugin into the bundle and rewrite the install names. The shipped .app
+# therefore runs on machines that do not have Qt installed.
+#
+# Snapshot build (no git tag needed):
+#   goreleaser release --snapshot --clean
+# Tagged release:
+#   git tag v0.1.0 && goreleaser release --clean
+#
+# Requirements on the build host:
+#   - Homebrew qt   (`brew install qt`)            — provides headers & macdeployqt
+#   - Go 1.22+      with cgo enabled
+#   - Xcode CLT     (`xcode-select --install`)     — clang for C++17
+
+version: 2
+
+project_name: diesel
+
+before:
+  hooks:
+    - go mod tidy
+    # Fail fast if the bundler tool is missing instead of producing a broken .app.
+    - sh -c 'command -v macdeployqt >/dev/null || { echo "macdeployqt not found — brew install qt" >&2; exit 1; }'
+
+builds:
+  - id: diesel
+    main: .
+    # Build the Mach-O directly inside the .app skeleton so the archive step
+    # naturally captures it at the right path.
+    binary: diesel.app/Contents/MacOS/diesel
+    env:
+      - CGO_ENABLED=1
+      - CGO_CXXFLAGS=-std=c++17
+    goos: [darwin]
+    # Restricted to the host arch: Homebrew's Qt is single-arch, so cross-arch
+    # cgo linking would fail. Add amd64 here only if you also have an
+    # amd64-built Qt available and PKG_CONFIG_PATH points at it.
+    goarch: [arm64]
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+    hooks:
+      post:
+        # {{ .Path }} = dist/diesel_darwin_arm64*/diesel.app/Contents/MacOS/diesel
+        - cmd: bash scripts/macos-bundle.sh "{{ .Path }}"
+
+archives:
+  - id: macos
+    builds: [diesel]
+    formats: [zip]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_macos_{{ .Arch }}"
+    # The binary is already included at diesel.app/Contents/MacOS/diesel via
+    # the build's `binary:` path. These entries pull in everything the
+    # post-build hook produced alongside it.
+    files:
+      - src: dist/diesel_darwin_*/diesel.app/Contents/Info.plist
+        dst: diesel.app/Contents/Info.plist
+      - src: dist/diesel_darwin_*/diesel.app/Contents/Frameworks
+        dst: diesel.app/Contents/Frameworks
+      - src: dist/diesel_darwin_*/diesel.app/Contents/PlugIns
+        dst: diesel.app/Contents/PlugIns
+      - src: dist/diesel_darwin_*/diesel.app/Contents/Resources
+        dst: diesel.app/Contents/Resources
+
+checksum:
+  name_template: 'checksums.txt'
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+# Disable the GitHub release step until you wire this up to a repo.
+release:
+  disable: true
