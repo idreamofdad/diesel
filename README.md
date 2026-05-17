@@ -1,5 +1,7 @@
 # Diesel
 
+[![Claude Logo](https://img.shields.io/badge/Claude-D97757?label=co-authored%20with)](https://claude.ai/code)
+
 Diesel is a desktop app for chatting with an AI companion.
 
 You can type to him, or use your voice he'll listen. He will speak back to you and send you a picture of Diesel. Turn on continuous conversation so you can just talk back and forth.
