@@ -43,9 +43,13 @@ var defaultWorkflow string
 // as a free-form map because node schemas vary wildly and we only ever
 // touch a handful of known keys — but it's a reference type, so mutating
 // it through a map-value copy still updates the graph we re-marshal.
+// Meta carries the optional `_meta` block ComfyUI's editor stamps on
+// exported nodes — we use `_meta.title` to identify the nudity toggle
+// without hard-coding a node ID.
 type workflowNode struct {
 	ClassType string         `json:"class_type"`
 	Inputs    map[string]any `json:"inputs"`
+	Meta      map[string]any `json:"_meta,omitempty"`
 }
 
 // rewritePromptAndSeed locates the sampler inside `graph` by its
@@ -107,6 +111,37 @@ func findSampler(graph map[string]workflowNode) (string, workflowNode, error) {
 func hasInput(n workflowNode, key string) bool {
 	_, ok := n.Inputs[key]
 	return ok
+}
+
+// setNudity flips the per-turn nudity toggle inside `graph` to match the
+// chat reply's `naked` flag. The target is a PrimitiveBoolean whose
+// `_meta.title` is "Nudity" — typically wired to a ComfySwitchNode that
+// gates the nudity LoRA. Workflows without a nudity toggle silently
+// no-op: not every graph supports the switch, and the prompt-fragment
+// splice upstream still pulls the renderer in the right direction.
+// Returns the matched node ID (empty string when no toggle exists) so
+// the caller can stamp it on a trace attribute.
+func setNudity(graph map[string]workflowNode, naked bool) string {
+	ids := make([]string, 0, len(graph))
+	for id := range graph {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		n := graph[id]
+		if n.ClassType != "PrimitiveBoolean" {
+			continue
+		}
+		title, _ := n.Meta["title"].(string)
+		if title != "Nudity" {
+			continue
+		}
+		if _, ok := n.Inputs["value"]; ok {
+			n.Inputs["value"] = naked
+			return id
+		}
+	}
+	return ""
 }
 
 // setConnectedText follows sampler.<key> — a ComfyUI input connection of

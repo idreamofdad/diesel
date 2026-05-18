@@ -21,6 +21,16 @@ func node(class string, inputs map[string]any) workflowNode {
 	return workflowNode{ClassType: class, Inputs: inputs}
 }
 
+// titled mirrors `node` but also stamps a `_meta.title`, matching how
+// ComfyUI's editor exports the API-format graph.
+func titled(class, title string, inputs map[string]any) workflowNode {
+	return workflowNode{
+		ClassType: class,
+		Inputs:    inputs,
+		Meta:      map[string]any{"title": title},
+	}
+}
+
 // connection mirrors ComfyUI's input wiring shape ["<node-id>", <slot>],
 // which is `[]any` after a json.Unmarshal round-trip.
 func connection(id string, slot int) []any {
