@@ -124,15 +124,22 @@
 
 <button
   class="mic"
-  class:recording
+  class:listening
+  class:capturing
   onclick={toggle}
-  disabled={disabled && !recording}
-  title={recording ? 'Stop recording' : 'Record (Silero VAD auto-stops on silence)'}
+  disabled={disabled && !listening}
+  title={listening
+    ? capturing
+      ? 'Speaking — release the silence to send'
+      : 'Listening — click to stop'
+    : 'Record (Silero VAD auto-stops on silence)'}
 >
   {#if busy}
     …
-  {:else if recording}
+  {:else if capturing}
     ⏹
+  {:else if listening}
+    ◎
   {:else}
     ◉
   {/if}
