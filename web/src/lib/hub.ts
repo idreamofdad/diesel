@@ -16,6 +16,8 @@ import { writable, get, type Writable } from './store';
 export type EventType =
   | 'turn_started'
   | 'turn_complete'
+  | 'audio_ready'
+  | 'portrait_ready'
   | 'turn_error'
   | 'status'
   | 'cleared'
@@ -177,15 +179,22 @@ function handleEvent(ev: HubEvent) {
       if (ev.user) history.update(h => [...h, ev.user!]);
       break;
     case 'turn_complete':
+      // Text arrives independently of audio/portrait now — paint it
+      // immediately and unlock input so the next turn can start.
       inFlight.set(false);
       if (ev.assistant) history.update(h => [...h, ev.assistant!]);
       if (ev.usage) usage.set(ev.usage);
-      if (ev.portrait_url) portraitURL.set(cacheBust(ev.portrait_url));
-      // Last-active wins: only play if this turn was ours and we're
-      // not muted.
+      break;
+    case 'audio_ready':
+      // Last-active wins: only the originating client plays the reply.
+      // Empty audio_url = "no audio for this turn" (TTS off / synth
+      // failed) — quietly ignored; nothing more to do.
       if (ev.origin === getClientID() && ev.audio_url && !get(muted)) {
         playAudio(ev.audio_url);
       }
+      break;
+    case 'portrait_ready':
+      if (ev.portrait_url) portraitURL.set(cacheBust(ev.portrait_url));
       break;
     case 'turn_error':
       inFlight.set(false);

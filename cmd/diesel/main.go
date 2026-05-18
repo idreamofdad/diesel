@@ -359,6 +359,10 @@ func main() {
 			sendBtn.SetEnabled(false)
 			message.SetEnabled(false)
 		case hub.EventTurnComplete:
+			// Text-only event now — audio and portrait arrive on
+			// their own events as they finish. Re-enable input the
+			// moment text is here so the next turn can start while
+			// media is still rendering.
 			if ev.Assistant != nil {
 				chat.AppendTurn(transcript, "Diesel", ev.Assistant.Content, labelBlue)
 			}
@@ -374,39 +378,44 @@ func main() {
 					tokensLabel.SetText(fmt.Sprintf("%d msgs · %d tokens", len(h.History()), total))
 				}
 			}
+		case hub.EventAudioReady:
+			// Last-active wins: only the originating subscriber plays.
+			// Sentinel event with empty AudioURL = "no audio for this
+			// turn" — fall straight through to the voice re-arm so
+			// continuous-conversation mode doesn't hang.
+			if ev.Origin != desktopOrigin {
+				break
+			}
+			armNext := func() {
+				if lastDesktopWasVoice && settings.Load().ContinuousConversation {
+					startListening()
+				}
+				lastDesktopWasVoice = false
+			}
+			if ev.AudioURL != "" {
+				id := strings.TrimPrefix(ev.AudioURL, "/api/audio/")
+				if data, ok := h.Audio(id); ok && len(data) > 0 {
+					if voice != nil {
+						voice.Stop()
+					}
+					sp, err := tts.Play(context.Background(), data)
+					if err != nil {
+						setStatus("✗ TTS: " + err.Error())
+						armNext()
+						break
+					}
+					sp.OnDone = armNext
+					voice = sp
+					break
+				}
+			}
+			armNext()
+		case hub.EventPortraitReady:
 			if ev.PortraitURL != "" {
 				id := strings.TrimPrefix(ev.PortraitURL, "/api/portrait/")
 				if data, ok := h.Portrait(id); ok {
 					showPortrait(data)
 				}
-			}
-			// Last-active wins: only play TTS if this turn was ours.
-			if ev.Origin == desktopOrigin {
-				armNext := func() {
-					if lastDesktopWasVoice && settings.Load().ContinuousConversation {
-						startListening()
-					}
-					lastDesktopWasVoice = false
-				}
-				if ev.AudioURL != "" {
-					id := strings.TrimPrefix(ev.AudioURL, "/api/audio/")
-					if data, ok := h.Audio(id); ok && len(data) > 0 {
-						if voice != nil {
-							voice.Stop()
-						}
-						sp, err := tts.Play(context.Background(), data)
-						if err != nil {
-							setStatus("✗ TTS: " + err.Error())
-							armNext()
-							return
-						}
-						sp.OnDone = armNext
-						voice = sp
-						return
-					}
-				}
-				// No audio (TTS off, synth failed, or cache miss).
-				armNext()
 			}
 		case hub.EventTurnError:
 			if ev.Origin == desktopOrigin {
