@@ -207,6 +207,14 @@ func Generate(ctx context.Context, s settings.AppSettings, positive, negative st
 		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
+	// Multi-line user settings (Settings has QTextEdits for the base
+	// prompt, clothing, nudity, and negative fragments) come through with
+	// embedded newlines once spliced together. CLIPTextEncode tokenizes
+	// each line independently, which drops cross-line concept blending
+	// and tends to leave the trailing fragments under-weighted, so flatten
+	// to a single line before handing the prompts to the rewriter.
+	positive = strings.ReplaceAll(positive, "\n", " ")
+	negative = strings.ReplaceAll(negative, "\n", " ")
 
 	// Parse a fresh graph per call — concurrent generations must never
 	// share the mutable node maps. Wrapped in its own span so the parse +
