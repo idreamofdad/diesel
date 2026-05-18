@@ -246,6 +246,111 @@ func TestRewritePromptAndSeed(t *testing.T) {
 	}
 }
 
+func TestSetNudity(t *testing.T) {
+	cases := []struct {
+		name      string
+		graph     map[string]workflowNode
+		naked     bool
+		wantID    string
+		wantValue any // nil means: assert the toggle was untouched
+	}{
+		{
+			name: "titled PrimitiveBoolean is flipped to true",
+			graph: map[string]workflowNode{
+				"56": titled("PrimitiveBoolean", "Nudity", map[string]any{"value": false}),
+			},
+			naked:     true,
+			wantID:    "56",
+			wantValue: true,
+		},
+		{
+			name: "titled PrimitiveBoolean is flipped to false",
+			graph: map[string]workflowNode{
+				"56": titled("PrimitiveBoolean", "Nudity", map[string]any{"value": true}),
+			},
+			naked:     false,
+			wantID:    "56",
+			wantValue: false,
+		},
+		{
+			name: "other PrimitiveBoolean nodes are ignored",
+			graph: map[string]workflowNode{
+				"40": titled("PrimitiveBoolean", "Aroused", map[string]any{"value": false}),
+				"56": titled("PrimitiveBoolean", "Nudity", map[string]any{"value": false}),
+			},
+			naked:     true,
+			wantID:    "56",
+			wantValue: true,
+		},
+		{
+			name: "lowest-id Nudity wins on duplicates",
+			graph: map[string]workflowNode{
+				"99": titled("PrimitiveBoolean", "Nudity", map[string]any{"value": false}),
+				"10": titled("PrimitiveBoolean", "Nudity", map[string]any{"value": false}),
+			},
+			naked:     true,
+			wantID:    "10",
+			wantValue: true,
+		},
+		{
+			name: "no toggle in graph is a silent no-op",
+			graph: map[string]workflowNode{
+				"4": node("CheckpointLoaderSimple", map[string]any{"ckpt_name": "x"}),
+			},
+			naked:  true,
+			wantID: "",
+		},
+		{
+			name: "Nudity title on a non-boolean node is ignored",
+			graph: map[string]workflowNode{
+				"56": titled("CLIPTextEncode", "Nudity", map[string]any{"text": "hi"}),
+			},
+			naked:  true,
+			wantID: "",
+		},
+		{
+			name: "missing value input means no flip",
+			graph: map[string]workflowNode{
+				"56": titled("PrimitiveBoolean", "Nudity", map[string]any{}),
+			},
+			naked:  true,
+			wantID: "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gotID := setNudity(tc.graph, tc.naked)
+			assert.Equal(t, tc.wantID, gotID)
+			if tc.wantID != "" && tc.wantValue != nil {
+				assert.Equal(t, tc.wantValue, tc.graph[tc.wantID].Inputs["value"])
+			}
+		})
+	}
+}
+
+func TestSetNudity_OnEmbeddedWorkflow(t *testing.T) {
+	// Round-trip against the actual graph shipped in the binary, so a
+	// re-export of default_workflow.json that drops the Nudity title or
+	// the PrimitiveBoolean class fails here instead of silently leaving
+	// the toggle stuck.
+	parse := func(t *testing.T) map[string]workflowNode {
+		t.Helper()
+		var g map[string]workflowNode
+		require.NoError(t, json.Unmarshal([]byte(defaultWorkflow), &g))
+		return g
+	}
+
+	g := parse(t)
+	id := setNudity(g, true)
+	require.NotEmpty(t, id, "embedded workflow should expose a Nudity toggle")
+	assert.Equal(t, true, g[id].Inputs["value"])
+
+	g = parse(t)
+	id2 := setNudity(g, false)
+	assert.Equal(t, id, id2, "toggle id is stable across calls")
+	assert.Equal(t, false, g[id].Inputs["value"])
+}
+
 func TestRewritePromptAndSeed_OnEmbeddedWorkflow(t *testing.T) {
 	// Round-trip through the actual workflow shipped in the binary —
 	// guards against drift between default_workflow.json and the
