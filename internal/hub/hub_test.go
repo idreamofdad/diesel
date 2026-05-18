@@ -1,8 +1,10 @@
 package hub
 
 import (
+	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -70,6 +72,67 @@ func TestSubscribe_ReplaceClosesPrior(t *testing.T) {
 	_, ok := <-first.Events
 	assert.False(t, ok, "first subscriber's channel must be closed when replaced")
 	assert.NotNil(t, second.Events)
+}
+
+// TestSend_DetachesCallerContext is a regression for the bug where
+// the goroutine inherited an HTTP handler's context: when the handler
+// returned (right after Send), the context canceled and the LLM HTTP
+// call inside runTurn died mid-flight with "context canceled". Send
+// must run runTurn with a context that ignores the caller's cancel.
+//
+// We can't drive a real LLM here, but we can assert the contract: an
+// EventTurnStarted (or EventTurnError, when there's no endpoint
+// configured) arrives at the subscriber *after* the caller's context
+// was canceled — proving the pipeline isn't gated on the caller's
+// context. The error path is fine for this; we're verifying the
+// goroutine got far enough to attempt and report, not that the LLM
+// itself succeeded.
+func TestSend_DetachesCallerContext(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("APPDATA", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	h := New()
+	sub := h.Subscribe("test")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	require.NoError(t, h.Send(ctx, "hi", "test"))
+	// Cancel immediately — mirrors a gin handler returning right
+	// after kicking off the turn.
+	cancel()
+
+	// Drain events. We expect EventTurnStarted (sync, before goroutine
+	// runs) and then EventTurnError (the goroutine tried to call the
+	// LLM, failed because no endpoint is configured — but crucially
+	// not because of "context canceled").
+	deadline := time.After(3 * time.Second)
+	var sawStarted, sawError bool
+	var errMsg string
+	for {
+		if sawStarted && sawError {
+			break
+		}
+		select {
+		case ev, ok := <-sub.Events:
+			if !ok {
+				t.Fatal("subscriber channel closed before terminal event")
+			}
+			switch ev.Type {
+			case EventTurnStarted:
+				sawStarted = true
+			case EventTurnError:
+				sawError = true
+				errMsg = ev.Error
+			}
+		case <-deadline:
+			t.Fatalf("timed out (started=%v error=%v)", sawStarted, sawError)
+		}
+	}
+	// The whole point of the test: the failure mode must not be the
+	// caller-cancel one we used to hit. Any other LLM/config error
+	// is fine — that's not what we're guarding against here.
+	assert.NotContains(t, errMsg, "context canceled",
+		"runTurn inherited caller's canceled context")
 }
 
 // TestComposeImagePrompt covers the three splice paths — clothing

@@ -318,7 +318,15 @@ func (h *Hub) Send(ctx context.Context, text, origin string) error {
 	})
 	h.setStatus("Sending…")
 
-	go h.runTurn(ctx, s, snapshot, origin, turnID)
+	// Detach the goroutine's context from the caller. When Send is
+	// invoked from an HTTP handler the caller's context cancels the
+	// moment the handler returns — which is right after this line —
+	// and that cancellation would propagate into the LLM HTTP call
+	// inside runTurn, surfacing as "Post …: context canceled". The
+	// turn pipeline genuinely outlives the originating request, so
+	// we keep the context's values (tracing span lineage) but drop
+	// the deadline/cancel.
+	go h.runTurn(context.WithoutCancel(ctx), s, snapshot, origin, turnID)
 	return nil
 }
 
