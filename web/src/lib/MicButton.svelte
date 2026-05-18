@@ -16,7 +16,19 @@
   import { MicVAD } from '@ricky0123/vad-web';
 
   let { disabled }: { disabled: boolean } = $props();
-  let recording = $state(false);
+  // Three independent states, deliberately split:
+  //   listening — VAD is running and the mic is open. Set by the
+  //               click handler and cleared on pause().
+  //   capturing — currently inside a speech segment (between
+  //               onSpeechStart and onSpeechEnd). Drives the red
+  //               recording indicator. Silero's VAD keeps listening
+  //               after each segment ends, so this naturally flips
+  //               back on for every new utterance — without the
+  //               onSpeechStart hook the red state would never come
+  //               back for subsequent segments.
+  //   busy      — upload to /api/transcribe in flight.
+  let listening = $state(false);
+  let capturing = $state(false);
   let busy = $state(false);
   let error = $state('');
   let vad: MicVAD | null = null;
@@ -27,9 +39,12 @@
       // Asset URLs — match the files vite.config.ts copies into public/.
       baseAssetPath: '/',
       onnxWASMBasePath: '/',
+      onSpeechStart: () => {
+        capturing = true;
+      },
       onSpeechEnd: async (audio: Float32Array) => {
         // VAD fired — wrap as WAV at 16 kHz mono and post for transcription.
-        recording = false;
+        capturing = false;
         busy = true;
         error = '';
         try {
@@ -45,25 +60,28 @@
         }
       },
       onVADMisfire: () => {
-        // Short blip that didn't hit the speech threshold — treat as
-        // "no speech detected" and reset UI.
-        recording = false;
+        // Short blip that didn't hit the speech threshold — clear the
+        // capturing state but leave the mic listening for the real one.
+        capturing = false;
       },
     });
     return vad;
   }
 
   async function toggle() {
-    if (disabled && !recording) return;
-    if (recording) {
+    // Mid-capture and mid-upload clicks pause the whole loop — the
+    // user clearly wants the mic off.
+    if (listening) {
       vad?.pause();
-      recording = false;
+      listening = false;
+      capturing = false;
       return;
     }
+    if (disabled) return;
     try {
       const v = await ensureVAD();
       v.start();
-      recording = true;
+      listening = true;
     } catch (e) {
       error = (e as Error).message;
     }
