@@ -26,6 +26,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -52,13 +53,29 @@ const (
 	// subscribers can append it to their transcript before the reply
 	// lands. Also marks the conversation as locked for other writers.
 	EventTurnStarted EventType = "turn_started"
-	// EventTurnComplete fires when the LLM reply is parsed and appended
-	// to history. Carries the assistant message, token usage, and (when
-	// available) URLs to fetch the synthesized audio and portrait. The
-	// audio URL is set only when TTS is enabled and synthesis succeeded;
-	// per-client routing (last-active wins) is the subscriber's job —
-	// only the subscriber whose ID matches Origin should fetch the audio.
+	// EventTurnComplete fires the moment the LLM reply is parsed and
+	// appended to history — before TTS synthesis or portrait rendering
+	// finish. Carries the assistant message, token usage, and the
+	// reply's emotion/naked flags. Audio and portrait URLs come later
+	// in separate events so the transcript paints instantly instead of
+	// waiting on the slowest media. inFlight clears on this event, so
+	// the next turn can start while audio/portrait for this one are
+	// still rendering in the background.
 	EventTurnComplete EventType = "turn_complete"
+	// EventAudioReady fires when TTS synthesis finishes for a turn —
+	// success, failure, or skip (TTS disabled / empty reply). When
+	// AudioURL is non-empty, the bytes are ready at that URL. When
+	// blank, no audio will arrive for this turn — used by the desktop
+	// client to advance the continuous-conversation loop without
+	// waiting forever for a TTS event that's never coming.
+	// Per-client routing (last-active wins) is the subscriber's job:
+	// only the subscriber whose ID matches Origin should fetch+play.
+	EventAudioReady EventType = "audio_ready"
+	// EventPortraitReady fires when portrait rendering finishes for
+	// a turn — success, failure, or skip (image gen disabled). When
+	// PortraitURL is non-empty, the PNG is ready at that URL. Broadcast
+	// to every subscriber.
+	EventPortraitReady EventType = "portrait_ready"
 	// EventTurnError fires when something in the pipeline failed badly
 	// enough that no assistant message will arrive. Releases the lock.
 	EventTurnError EventType = "turn_error"
@@ -374,62 +391,17 @@ func (h *Hub) runTurn(ctx context.Context, s settings.AppSettings, snapshot []ch
 	h.mu.Lock()
 	h.history = append(h.history, assistant)
 	hist := append([]chat.Message(nil), h.history...)
+	// Clear inFlight as soon as text lands so the user can immediately
+	// send the next message — TTS and portrait rendering keep running
+	// in the background and arrive on their own events.
+	h.inFlight = false
 	h.mu.Unlock()
 	if s.SaveToDisk {
 		_ = conversation.Save(turnCtx, hist)
 	}
 
-	// Run TTS and portrait in parallel — both are best-effort and their
-	// failure mode is "no audio / no portrait", not "turn failed".
-	var (
-		wg          sync.WaitGroup
-		audioID     string
-		portraitID  string
-	)
-	if s.EnableTTS && reply.Text != "" {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			ep := util.FirstNonEmpty(s.TTSEndpoint, s.APIEndpoint)
-			key := util.FirstNonEmpty(s.TTSAPIKey, s.APIKey)
-			data, err := tts.Synthesize(turnCtx, ep, key, s.TTSModel, s.TTSVoice, reply.Text)
-			if err != nil || len(data) == 0 {
-				return
-			}
-			id := fmt.Sprintf("%d", turnID)
-			h.mu.Lock()
-			h.audio.put(id, data)
-			h.mu.Unlock()
-			audioID = id
-		}()
-	}
-	if s.EnableImageGen {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			prompt := composeImagePrompt(s, reply.Emotion, reply.Naked)
-			// onProgress callbacks are dropped — preview frames are an
-			// optimization the desktop GUI used to consume. Adding them
-			// back per-subscriber is a follow-up.
-			png, err := comfyui.Generate(turnCtx, s, prompt, s.ImageNegativePrompt, reply.Naked, nil)
-			if err != nil || len(png) == 0 {
-				return
-			}
-			_ = comfyui.SaveCharacterImage(png)
-			id := fmt.Sprintf("%d", turnID)
-			h.mu.Lock()
-			h.portraits.put(id, png)
-			h.mu.Unlock()
-			portraitID = id
-		}()
-	}
-	wg.Wait()
-
-	h.mu.Lock()
-	h.inFlight = false
-	h.mu.Unlock()
-
-	ev := Event{
+	// Text event fires immediately — no waiting on media.
+	h.broadcast(Event{
 		Type:      EventTurnComplete,
 		Origin:    origin,
 		Assistant: &assistant,
@@ -437,15 +409,78 @@ func (h *Hub) runTurn(ctx context.Context, s settings.AppSettings, snapshot []ch
 		Naked:     reply.Naked,
 		Usage:     &usage,
 		Timestamp: time.Now(),
-	}
-	if audioID != "" {
-		ev.AudioURL = "/api/audio/" + audioID
-	}
-	if portraitID != "" {
-		ev.PortraitURL = "/api/portrait/" + portraitID
-	}
-	h.broadcast(ev)
+	})
 	h.setStatus("Ready")
+
+	// Spawn TTS and portrait as independent goroutines. Each broadcasts
+	// its own *Ready event when done — success or failure. Sentinel
+	// events with empty URLs are intentional: clients (notably the
+	// desktop continuous-conversation loop) need a definitive "no
+	// audio for this turn" signal to advance, otherwise they'd wait
+	// forever for a synthesis that's never coming.
+	go h.synthesizeAudio(turnCtx, s, reply, origin, turnID)
+	go h.renderPortrait(turnCtx, s, reply, turnID)
+}
+
+// synthesizeAudio runs TTS and broadcasts EventAudioReady when done.
+// Always broadcasts — an empty AudioURL on the event means "no audio
+// for this turn", which is what subscribers need to know whether to
+// keep waiting or move on.
+func (h *Hub) synthesizeAudio(ctx context.Context, s settings.AppSettings, reply chat.Reply, origin string, turnID int64) {
+	ev := Event{
+		Type:      EventAudioReady,
+		Origin:    origin,
+		Timestamp: time.Now(),
+	}
+	defer func() {
+		ev.Timestamp = time.Now()
+		h.broadcast(ev)
+	}()
+	if !s.EnableTTS || strings.TrimSpace(reply.Text) == "" {
+		return
+	}
+	ep := util.FirstNonEmpty(s.TTSEndpoint, s.APIEndpoint)
+	key := util.FirstNonEmpty(s.TTSAPIKey, s.APIKey)
+	data, err := tts.Synthesize(ctx, ep, key, s.TTSModel, s.TTSVoice, reply.Text)
+	if err != nil || len(data) == 0 {
+		return
+	}
+	id := fmt.Sprintf("%d", turnID)
+	h.mu.Lock()
+	h.audio.put(id, data)
+	h.mu.Unlock()
+	ev.AudioURL = "/api/audio/" + id
+}
+
+// renderPortrait runs ComfyUI image generation and broadcasts
+// EventPortraitReady when done — same always-broadcast contract as
+// synthesizeAudio. Empty PortraitURL = "no portrait for this turn".
+func (h *Hub) renderPortrait(ctx context.Context, s settings.AppSettings, reply chat.Reply, turnID int64) {
+	ev := Event{
+		Type:      EventPortraitReady,
+		Timestamp: time.Now(),
+	}
+	defer func() {
+		ev.Timestamp = time.Now()
+		h.broadcast(ev)
+	}()
+	if !s.EnableImageGen {
+		return
+	}
+	prompt := composeImagePrompt(s, reply.Emotion, reply.Naked)
+	// onProgress callbacks are dropped — preview frames are an
+	// optimization the desktop GUI used to consume. Adding them
+	// back per-subscriber is a follow-up.
+	png, err := comfyui.Generate(ctx, s, prompt, s.ImageNegativePrompt, reply.Naked, nil)
+	if err != nil || len(png) == 0 {
+		return
+	}
+	_ = comfyui.SaveCharacterImage(png)
+	id := fmt.Sprintf("%d", turnID)
+	h.mu.Lock()
+	h.portraits.put(id, png)
+	h.mu.Unlock()
+	ev.PortraitURL = "/api/portrait/" + id
 }
 
 // composeImagePrompt assembles the image prompt the same way the
