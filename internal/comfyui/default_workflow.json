@@ -21,7 +21,7 @@
   },
   "6": {
     "inputs": {
-      "text": "3d, solo, 1man, dubusi, a fat man with a braided beard and short green hair and green eyes wearing a blue t-shirt shirt and blue jeans,\n\ndaytime a living room with a red couch in front of windows to a suburban backyard,\n\nstanding, happy expression",
+      "text": "3d, solo, 1man, dubusi, a fat man with a braided beard and short green hair and green eyes while standing, looking at viewer, belly,\n\ndaytime a living room with a red couch and television in front of windows to a suburban backyard, completely nude, naked, no clothing, small short flaccid penis with foreskin, green pubic hair, green chest hair, flushed cheeks, half-lidded eyes, parted lips, biting lower lip, aroused expression, smirk",
       "clip": [
         "4",
         1
@@ -34,7 +34,7 @@
   },
   "7": {
     "inputs": {
-      "text": "woman, girl, shirt logo, feminine, wide hips",
+      "text": "woman, girl, shirt logo, feminine, wide hips, muscular, long penis",
       "clip": [
         "4",
         1
@@ -48,16 +48,22 @@
   "10": {
     "inputs": {
       "add_noise": "enable",
-      "noise_seed": 92468635639302,
-      "steps": 10,
+      "noise_seed": 312122644965112,
+      "steps": [
+        "57",
+        0
+      ],
       "cfg": 4,
       "sampler_name": "euler_ancestral",
       "scheduler": "normal",
       "start_at_step": 0,
-      "end_at_step": 10,
+      "end_at_step": [
+        "57",
+        0
+      ],
       "return_with_leftover_noise": "enable",
       "model": [
-        "53",
+        "54",
         0
       ],
       "positive": [
@@ -119,6 +125,58 @@
     "class_type": "LoraLoaderModelOnly",
     "_meta": {
       "title": "Load LoRA"
+    }
+  },
+  "54": {
+    "inputs": {
+      "switch": [
+        "56",
+        0
+      ],
+      "on_false": [
+        "53",
+        0
+      ],
+      "on_true": [
+        "55",
+        0
+      ]
+    },
+    "class_type": "ComfySwitchNode",
+    "_meta": {
+      "title": "Nudity Switch"
+    }
+  },
+  "55": {
+    "inputs": {
+      "lora_name": "il\\concept\\flaccid_uncut.safetensors",
+      "strength_model": 1,
+      "model": [
+        "53",
+        0
+      ]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "Load LoRA"
+    }
+  },
+  "56": {
+    "inputs": {
+      "value": true
+    },
+    "class_type": "PrimitiveBoolean",
+    "_meta": {
+      "title": "Nudity"
+    }
+  },
+  "57": {
+    "inputs": {
+      "value": 10
+    },
+    "class_type": "PrimitiveInt",
+    "_meta": {
+      "title": "Steps"
     }
   }
 }

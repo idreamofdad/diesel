@@ -46,6 +46,7 @@ func TestDefault_HasExpectedDefaults(t *testing.T) {
 	assert.False(t, s.EnableImageGen, "image gen should default off — needs separate ComfyUI")
 	assert.NotEmpty(t, s.SystemPrompt, "system prompt has a baked-in default")
 	assert.Equal(t, "http://127.0.0.1:8188", s.ComfyUIEndpoint)
+	assert.Equal(t, 10, s.ImageSteps, "image steps default seeds the bundled workflow's Steps node")
 }
 
 // modelsServer stands up an httptest server that responds to /models

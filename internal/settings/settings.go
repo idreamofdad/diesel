@@ -120,6 +120,11 @@ type AppSettings struct {
 	ImageClothing       string `json:"image_clothing"`
 	ImageNudity         string `json:"image_nudity"`
 	ImageNegativePrompt string `json:"image_negative_prompt"`
+	// ImageSteps overrides the sampler step count in the bundled workflow.
+	// Higher = slower but typically sharper. 0 (or a workflow without the
+	// "Steps" PrimitiveInt node) leaves whatever the workflow specifies in
+	// place — same fall-through behavior as the nudity toggle.
+	ImageSteps int `json:"image_steps"`
 }
 
 // Default returns the starting values used when no settings file exists
@@ -146,6 +151,7 @@ func Default() AppSettings {
 		ImageClothing:       imageClothing,
 		ImageNudity:         nudityPrompt,
 		ImageNegativePrompt: imageNegativePrompt,
+		ImageSteps:          10,
 	}
 }
 

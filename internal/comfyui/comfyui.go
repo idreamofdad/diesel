@@ -43,9 +43,13 @@ var defaultWorkflow string
 // as a free-form map because node schemas vary wildly and we only ever
 // touch a handful of known keys — but it's a reference type, so mutating
 // it through a map-value copy still updates the graph we re-marshal.
+// Meta carries the optional `_meta` block ComfyUI's editor stamps on
+// exported nodes — we use `_meta.title` to identify the nudity toggle
+// without hard-coding a node ID.
 type workflowNode struct {
 	ClassType string         `json:"class_type"`
 	Inputs    map[string]any `json:"inputs"`
+	Meta      map[string]any `json:"_meta,omitempty"`
 }
 
 // rewritePromptAndSeed locates the sampler inside `graph` by its
@@ -109,6 +113,71 @@ func hasInput(n workflowNode, key string) bool {
 	return ok
 }
 
+// setNudity flips the per-turn nudity toggle inside `graph` to match the
+// chat reply's `naked` flag. The target is a PrimitiveBoolean whose
+// `_meta.title` is "Nudity" — typically wired to a ComfySwitchNode that
+// gates the nudity LoRA. Workflows without a nudity toggle silently
+// no-op: not every graph supports the switch, and the prompt-fragment
+// splice upstream still pulls the renderer in the right direction.
+// Returns the matched node ID (empty string when no toggle exists) so
+// the caller can stamp it on a trace attribute.
+func setNudity(graph map[string]workflowNode, naked bool) string {
+	ids := make([]string, 0, len(graph))
+	for id := range graph {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		n := graph[id]
+		if n.ClassType != "PrimitiveBoolean" {
+			continue
+		}
+		title, _ := n.Meta["title"].(string)
+		if title != "Nudity" {
+			continue
+		}
+		if _, ok := n.Inputs["value"]; ok {
+			n.Inputs["value"] = naked
+			return id
+		}
+	}
+	return ""
+}
+
+// setSteps overrides the sampler step count by writing to the
+// PrimitiveInt node titled "Steps" in `graph`. The bundled workflow
+// wires that node into both the sampler's `steps` and `end_at_step`
+// inputs so a single value drives both, the same way the nudity toggle
+// drives the ComfySwitchNode. Workflows without a "Steps" node — or
+// callers passing a non-positive value — silently no-op; the workflow's
+// hard-coded step count then wins. Returns the matched node ID (empty
+// when no override happened) for tracing.
+func setSteps(graph map[string]workflowNode, steps int) string {
+	if steps <= 0 {
+		return ""
+	}
+	ids := make([]string, 0, len(graph))
+	for id := range graph {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		n := graph[id]
+		if n.ClassType != "PrimitiveInt" {
+			continue
+		}
+		title, _ := n.Meta["title"].(string)
+		if title != "Steps" {
+			continue
+		}
+		if _, ok := n.Inputs["value"]; ok {
+			n.Inputs["value"] = steps
+			return id
+		}
+	}
+	return ""
+}
+
 // setConnectedText follows sampler.<key> — a ComfyUI input connection of
 // the form ["<node-id>", <slot>] — to its source node and rewrites that
 // node's `text` field. Used to redirect the sampler's positive/negative
@@ -153,10 +222,11 @@ type Progress struct {
 // intermediate preview frames as binary messages. It runs on the
 // goroutine driving Generate, so a Qt-thread caller should funnel
 // updates through a channel.
-func Generate(ctx context.Context, s settings.AppSettings, positive, negative string, onProgress func(Progress)) ([]byte, error) {
+func Generate(ctx context.Context, s settings.AppSettings, positive, negative string, naked bool, onProgress func(Progress)) ([]byte, error) {
 	ctx, span := tracing.StartSpan(ctx, "image.generate",
 		attribute.Int("image.prompt.length", len(positive)),
 		attribute.Int("image.negative_prompt.length", len(negative)),
+		attribute.Bool("image.naked", naked),
 	)
 	defer span.End()
 
@@ -171,6 +241,14 @@ func Generate(ctx context.Context, s settings.AppSettings, positive, negative st
 		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
+	// Multi-line user settings (Settings has QTextEdits for the base
+	// prompt, clothing, nudity, and negative fragments) come through with
+	// embedded newlines once spliced together. CLIPTextEncode tokenizes
+	// each line independently, which drops cross-line concept blending
+	// and tends to leave the trailing fragments under-weighted, so flatten
+	// to a single line before handing the prompts to the rewriter.
+	positive = strings.ReplaceAll(positive, "\n", " ")
+	negative = strings.ReplaceAll(negative, "\n", " ")
 
 	// Parse a fresh graph per call — concurrent generations must never
 	// share the mutable node maps. Wrapped in its own span so the parse +
@@ -202,12 +280,29 @@ func Generate(ctx context.Context, s settings.AppSettings, positive, negative st
 		return nil, fmt.Errorf("workflow: %w", err)
 	}
 	rewriteSpan.SetAttributes(attribute.String("workflow.sampler_id", samplerID))
+	nudityID := setNudity(graph, naked)
+	if nudityID != "" {
+		rewriteSpan.SetAttributes(attribute.String("workflow.nudity_id", nudityID))
+	}
+	stepsID := setSteps(graph, s.ImageSteps)
+	if stepsID != "" {
+		rewriteSpan.SetAttributes(
+			attribute.String("workflow.steps_id", stepsID),
+			attribute.Int("workflow.steps_value", s.ImageSteps),
+		)
+	}
 	rewriteSpan.End()
 	_ = rewriteCtx
 	span.SetAttributes(
 		attribute.Int64("image.seed", seed),
 		attribute.String("workflow.sampler_id", samplerID),
 	)
+	if nudityID != "" {
+		span.SetAttributes(attribute.String("workflow.nudity_id", nudityID))
+	}
+	if stepsID != "" {
+		span.SetAttributes(attribute.String("workflow.steps_id", stepsID))
+	}
 	// Stderr trace of what we're actually sending. Visible when Diesel is
 	// launched from a terminal, invisible in the packaged .app — useful
 	// for verifying the emotion splice without adding UI noise.
