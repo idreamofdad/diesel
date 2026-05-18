@@ -8,7 +8,10 @@
 *.dll
 *.so
 *.dylib
-dist/
+# goreleaser's output. Leading slash anchors to repo root so it doesn't
+# accidentally swallow web/dist/ (the Svelte build output, which has
+# its own .gitignore policy in web/.gitignore).
+/dist/
 # Built binary at the repo root; leading slash anchors to root so the
 # cmd/diesel/ source directory isn't excluded.
 /diesel

@@ -125,6 +125,19 @@ type AppSettings struct {
 	// "Steps" PrimitiveInt node) leaves whatever the workflow specifies in
 	// place — same fall-through behavior as the nudity toggle.
 	ImageSteps int `json:"image_steps"`
+	// HTTP server settings. EnableServer gates the whole thing; when off,
+	// no listener is opened and the remote web UI is unreachable. The
+	// server binds to 127.0.0.1 by default — flipping ServerExposeNetwork
+	// switches the bind to 0.0.0.0 so other machines on the LAN can
+	// connect. ServerPort is shared between both modes. ServerAuthToken
+	// is an optional static bearer token; when non-empty every HTTP
+	// request and WS upgrade must carry it (Authorization: Bearer …, or
+	// ?token=… on the WS URL). Blank token = no auth — fine on
+	// loopback, dangerous on 0.0.0.0, but the user gets to choose.
+	EnableServer        bool   `json:"enable_server"`
+	ServerExposeNetwork bool   `json:"server_expose_network"`
+	ServerPort          int    `json:"server_port"`
+	ServerAuthToken     string `json:"server_auth_token"`
 }
 
 // Default returns the starting values used when no settings file exists
@@ -152,6 +165,12 @@ func Default() AppSettings {
 		ImageNudity:         nudityPrompt,
 		ImageNegativePrompt: imageNegativePrompt,
 		ImageSteps:          10,
+		// Server defaults off — opening a port is opt-in. 7777 picked
+		// because it's well outside reserved ranges and unlikely to
+		// collide with another local service. Loopback-only by default;
+		// the network checkbox is the explicit "I know what I'm doing"
+		// gesture for LAN exposure.
+		ServerPort: 7777,
 	}
 }
 

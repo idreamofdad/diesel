@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"mime/multipart"
 	"net/http"
@@ -303,13 +304,33 @@ func EncodeWAV(pcm []byte) []byte {
 // multipart/form-data, following the OpenAI Whisper API contract.
 // Speaches, faster-whisper-server, and OpenAI itself implement the same
 // shape, which is why we don't need a per-provider switch here.
+//
+// This is a thin convenience wrapper that always declares the upload as
+// WAV — what the desktop's PortAudio→WAV pipeline produces. For audio
+// in other codecs (browser MediaRecorder gives WebM/Opus or MP4/AAC)
+// call TranscribeBlob and pass the original filename + content type.
 func Transcribe(ctx context.Context, endpoint, apiKey, model string, wavData []byte) (string, error) {
+	return TranscribeBlob(ctx, endpoint, apiKey, model, "audio.wav", "audio/wav", wavData)
+}
+
+// TranscribeBlob is the passthrough variant: it forwards `data` as-is
+// to the STT server with whatever filename/content-type the caller
+// provides. OpenAI-compatible STT servers (OpenAI, Speaches,
+// faster-whisper-server, and LM Studio's whisper proxy) accept
+// mp3/mp4/mpeg/mpga/m4a/wav/webm and sniff the format from the
+// filename — passing the originating extension is what makes the
+// browser path work without server-side transcoding.
+func TranscribeBlob(ctx context.Context, endpoint, apiKey, model, filename, contentType string, data []byte) (string, error) {
 	if model = strings.TrimSpace(model); model == "" {
 		model = sttDefaultModel
 	}
+	if filename == "" {
+		filename = "audio.wav"
+	}
 	ctx, span := tracing.StartSpan(ctx, "stt.transcribe",
 		attribute.String("stt.model", model),
-		attribute.Int("stt.audio.bytes", len(wavData)),
+		attribute.Int("stt.audio.bytes", len(data)),
+		attribute.String("stt.audio.filename", filename),
 	)
 	defer span.End()
 
@@ -322,13 +343,26 @@ func Transcribe(ctx context.Context, endpoint, apiKey, model string, wavData []b
 
 	var body bytes.Buffer
 	w := multipart.NewWriter(&body)
-	part, err := w.CreateFormFile("file", "audio.wav")
+	// Construct the form file part manually so we can stamp a real
+	// Content-Type when the caller provided one (browser uploads do).
+	// CreateFormFile would default to application/octet-stream, which
+	// some stricter STT servers reject for non-WAV codecs.
+	partHeader := make(map[string][]string)
+	partHeader["Content-Disposition"] = []string{
+		fmt.Sprintf(`form-data; name="file"; filename=%q`, filename),
+	}
+	if ct := strings.TrimSpace(contentType); ct != "" {
+		partHeader["Content-Type"] = []string{ct}
+	} else {
+		partHeader["Content-Type"] = []string{"application/octet-stream"}
+	}
+	part, err := w.CreatePart(partHeader)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		return "", err
 	}
-	if _, err := part.Write(wavData); err != nil {
+	if _, err := part.Write(data); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		return "", err

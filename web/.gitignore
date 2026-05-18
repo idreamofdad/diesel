@@ -1,0 +1,11 @@
+node_modules/
+.vite/
+public/
+# dist/ is the Vite build output. We don't commit minified assets
+# (noisy review diffs, big repo). The //go:embed all:dist directive
+# in embed.go needs *something* in dist/ at compile time, so .gitkeep
+# stays tracked as a sentinel. On fresh clones with no Vite build,
+# the Go server detects the empty embed and serves a stub HTML
+# pointing at `go generate ./...`.
+dist/*
+!dist/.gitkeep

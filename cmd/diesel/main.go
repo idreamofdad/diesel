@@ -12,15 +12,14 @@ import (
 	"diesel/internal/audio"
 	"diesel/internal/chat"
 	"diesel/internal/comfyui"
-	"diesel/internal/conversation"
+	"diesel/internal/hub"
+	"diesel/internal/server"
 	"diesel/internal/settings"
 	"diesel/internal/tracing"
 	"diesel/internal/tts"
 	"diesel/internal/util"
 
 	qt "github.com/mappu/miqt/qt6"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
 )
 
 // Transcript speaker-label colors. Blue for both sides of the conversation;
@@ -30,6 +29,11 @@ const (
 	labelBlue = "#5aa7ff"
 	labelRed  = "#e57373"
 )
+
+// desktopOrigin is the subscriber ID the Qt UI registers with the hub.
+// Stable string (not a UUID) so the hub's "last-active wins" TTS
+// routing and the busy-broadcast filter both know who "the desktop" is.
+const desktopOrigin = "desktop"
 
 func main() {
 	// OpenTelemetry: a no-op unless OTEL_EXPORTER_OTLP_ENDPOINT (or the
@@ -48,6 +52,17 @@ func main() {
 		}()
 	}
 
+	// Hub owns the conversation. Started before any UI so the on-disk
+	// history is loaded by the time Qt is ready to paint it.
+	h := hub.New()
+	h.Start(context.Background())
+
+	// HTTP server. Wired up before the window opens so it's reachable
+	// immediately if EnableServer is on in the persisted settings.
+	srvMgr := server.New(h, embeddedWebFS())
+	srvMgr.Apply(settings.Load())
+	defer srvMgr.Stop()
+
 	qt.NewQApplication(os.Args)
 
 	window := qt.NewQMainWindow(nil)
@@ -55,8 +70,7 @@ func main() {
 	window.Resize(960, 560)
 	// Color palette matched to the Tk-rendered Python reference: dark grays
 	// throughout, *gray* list selection (not the system blue), no harsh
-	// borders. The native Qt dark style on macOS is close but uses system
-	// accent colors for selection, which clashed with the reference.
+	// borders.
 	window.SetStyleSheet(`
 		QMainWindow, QWidget { background-color: #2b2b2b; color: #ececec; }
 		QLabel { color: #ececec; }
@@ -123,11 +137,9 @@ func main() {
 	bodyLayout.SetContentsMargins(14, 12, 14, 12)
 	bodyLayout.SetSpacing(12)
 
-	// Right column: the character portrait. ComfyUI renders a fresh one
-	// after each reply when image generation is enabled (Settings); until
-	// then the panel just shows a placeholder. Fixed width so the
-	// transcript column gets all the slack. Built here, but added to the
-	// body layout after the conversation column so it sits on the right.
+	// Right column: the character portrait. The hub caches the most
+	// recent portrait and the desktop subscriber pulls it via Portrait()
+	// when EventTurnComplete arrives.
 	const portraitWidth = 300
 	portraitCol := qt.NewQVBoxLayout2()
 	portraitCol.SetSpacing(8)
@@ -148,19 +160,8 @@ func main() {
 	portraitCol.AddWidget(portrait.QWidget)
 	portraitCol.AddStretch()
 
-	// latestPortraitPNG caches the bytes of the most recently shown
-	// *final* portrait — not the intermediate diffusion previews — so the
-	// double-click viewer can pop up the high-quality image without
-	// re-reading from disk. Set from disk on startup and after each
-	// successful render.
 	var latestPortraitPNG []byte
-
-	// showPortrait loads PNG bytes into the panel, scaled to the panel
-	// width with the aspect ratio preserved. Empty or undecodable data
-	// leaves whatever is already showing in place. `final` selects whether
-	// these bytes should also feed the full-size viewer — preview frames
-	// during generation pass false so the viewer keeps the previous final.
-	showPortrait := func(png []byte, final bool) {
+	showPortrait := func(png []byte) {
 		if len(png) == 0 {
 			return
 		}
@@ -168,22 +169,14 @@ func main() {
 		if !pm.LoadFromDataWithData(png) || pm.IsNull() {
 			return
 		}
-		if final {
-			latestPortraitPNG = png
-		}
+		latestPortraitPNG = png
 		portrait.SetPixmap(pm.ScaledToWidth2(portraitWidth, qt.SmoothTransformation))
 	}
-	// Restore the last rendered portrait so the window opens with Diesel's
-	// face already in place rather than the placeholder.
-	if p, err := comfyui.CharacterImagePath(); err == nil {
-		if data, err := os.ReadFile(p); err == nil {
-			showPortrait(data, true)
-		}
+	// Seed from the hub if it managed to load the cached portrait.
+	if _, png := h.LatestPortrait(); len(png) > 0 {
+		showPortrait(png)
 	}
 
-	// Double-click pops the full-resolution portrait in a modal viewer
-	// dialog. We work from the cached bytes — re-decoding the original
-	// PNG rather than upscaling the scaled-down thumbnail.
 	portrait.OnMouseDoubleClickEvent(func(super func(event *qt.QMouseEvent), event *qt.QMouseEvent) {
 		super(event)
 		if len(latestPortraitPNG) == 0 {
@@ -196,18 +189,26 @@ func main() {
 	convCol := qt.NewQVBoxLayout2()
 	convCol.SetSpacing(8)
 
-	// Header: the "Conversation" title.
 	convHdr := qt.NewQLabel5("Conversation", nil)
 	hdrFont := convHdr.Font()
 	hdrFont.SetBold(true)
 	convHdr.SetFont(hdrFont)
 	convCol.AddWidget(convHdr.QWidget)
 
-	// Transcript area — read-only, with placeholder text shown when empty.
 	transcript := qt.NewQTextEdit(nil)
 	transcript.SetReadOnly(true)
 	transcript.SetPlaceholderText("(Conversation will appear here)")
 	convCol.AddWidget(transcript.QWidget)
+
+	// Paint any previously-persisted history that the hub loaded on Start.
+	for _, m := range h.History() {
+		switch m.Role {
+		case chat.RoleUser:
+			chat.AppendTurn(transcript, "You", m.Content, labelRed)
+		case chat.RoleAssistant:
+			chat.AppendTurn(transcript, "Diesel", m.Content, labelBlue)
+		}
+	}
 
 	// Message input row.
 	inputRow := qt.NewQHBoxLayout2()
@@ -219,10 +220,7 @@ func main() {
 	inputRow.AddWidget(sendBtn.QWidget)
 	convCol.AddLayout(inputRow.QLayout)
 
-	// Media controls row: record + upload buttons. Both get a round-ish
-	// stylesheet to match the Python reference. AddStretch pushes them to
-	// the left so they don't drift to the row's center when the window is
-	// wide.
+	// Media controls row: record + upload buttons.
 	mediaRow := qt.NewQHBoxLayout2()
 	mediaRow.SetSpacing(8)
 	roundBtnStyle := `
@@ -247,7 +245,6 @@ func main() {
 	mediaRow.AddStretch()
 	convCol.AddLayout(mediaRow.QLayout)
 
-	// Conversation takes the slack; the portrait sits fixed-width on the right.
 	bodyLayout.AddLayout2(convCol.QLayout, 1)
 	bodyLayout.AddLayout(portraitCol.QLayout)
 	outer.AddWidget2(body, 1)
@@ -261,41 +258,24 @@ func main() {
 	outer.AddWidget(divider.QWidget)
 
 	// ─── Status bar strip ─────────────────────────────────────────────────
-	// Left-aligned status label, defaults to "Ready" until something
-	// updates it. Roomy horizontal/vertical padding so the text breathes.
 	footer := qt.NewQWidget(nil)
 	footerLayout := qt.NewQHBoxLayout(footer)
 	footerLayout.SetContentsMargins(14, 8, 14, 8)
 	status := qt.NewQLabel5("Ready", nil)
-	// Without this, a long error string would push the label's sizeHint
-	// wide enough to force the whole window to grow. Ignored on the
-	// horizontal axis tells the layout the label is happy at any width;
-	// we hide overflow with an ellipsis in setStatus below.
 	status.QWidget.SetSizePolicy2(qt.QSizePolicy__Ignored, qt.QSizePolicy__Preferred)
 	status.QWidget.SetMinimumWidth(0)
 	footerLayout.AddWidget2(status.QWidget, 1)
 
-	// Right-aligned token gauge — populated from the `usage` block the
-	// server returns on each completion. Stays blank until the first
-	// reply lands; some local servers omit `usage` entirely, in which
-	// case it just stays blank rather than showing a misleading 0.
 	tokensLabel := qt.NewQLabel5("", nil)
 	tokensLabel.SetStyleSheet("color: #888; font-size: 11px;")
 	footerLayout.AddWidget(tokensLabel.QWidget)
 
 	outer.AddWidget(footer)
 
-	// setStatus updates the status bar with `msg`, eliding overflow with
-	// an ellipsis rather than letting QLabel paint past its allotted
-	// width. We remember the raw text so a window resize can re-elide
-	// against the new width instead of permanently truncating.
 	statusRaw := "Ready"
 	applyStatus := func() {
 		w := status.QWidget.Width()
 		if w <= 0 {
-			// Before the first layout pass the width is 0 — show the
-			// raw text and let the resize event re-elide once Qt has
-			// settled the geometry.
 			status.SetText(statusRaw)
 			return
 		}
@@ -311,361 +291,35 @@ func main() {
 		applyStatus()
 	})
 
-	// ─── Send wiring ──────────────────────────────────────────────────────
-	// Triggered by either the Send button or Return in the message field.
-	// Keeps an in-memory chat log alongside the visible transcript so we
-	// can replay prior turns to the model on each call.
-	//
-	// The HTTP request runs in a goroutine while a QTimer on the main
-	// thread polls a result channel. Running it inline on the UI thread
-	// would freeze the event loop, which on macOS means the just-appended
-	// "You:" paragraph wouldn't paint until the LLM replied — even with
-	// ProcessEvents/Repaint, because Cocoa defers the display to its
-	// compositor. Doing the work off-thread lets the Qt loop keep ticking
-	// and paint normally.
-	// History is restored from disk on launch (when "Save conversations to
-	// disk" is enabled) so the window opens pre-populated with the previous
-	// conversation. persistConversation mirrors the in-memory log back out
-	// after every change; it's a no-op when the setting is off, and a
-	// failed write only surfaces in the status bar — losing the transcript
-	// is far worse than a stale save file.
-	var history []chat.Message
-	if settings.Load().SaveToDisk {
-		history = conversation.Load()
-		for _, m := range history {
-			switch m.Role {
-			case chat.RoleUser:
-				chat.AppendTurn(transcript, "You", m.Content, labelRed)
-			case chat.RoleAssistant:
-				chat.AppendTurn(transcript, "Diesel", m.Content, labelBlue)
-			}
-		}
-	}
-	// ctx threads the active turn span into the disk write so the save
-	// nests under chat.turn instead of starting a new trace root. Callers
-	// outside a turn pass context.Background().
-	persistConversation := func(ctx context.Context) {
-		if !settings.Load().SaveToDisk {
-			return
-		}
-		if err := conversation.Save(ctx, history); err != nil {
-			setStatus("✗ Could not save conversation: " + err.Error())
-		}
-	}
-	type chatResult struct {
-		reply chat.Reply
-		usage chat.Usage
-		err   error
-	}
+	// ─── Hub subscription ─────────────────────────────────────────────────
+	// The desktop UI is one of N possible clients now. The hub is the
+	// canonical writer; this subscription is the only path through which
+	// the transcript, portrait, status bar, and token counter are
+	// updated. Events from the hub flow on a Go channel; a QTimer drains
+	// them on the Qt main thread so widget mutations stay thread-safe.
+	desktopSub := h.Subscribe(desktopOrigin)
 
-	// Active TTS playback, if any. Replaced on each new assistant reply
-	// and interrupted when the user starts recording (so Diesel doesn't
-	// keep talking over the user's response).
-	var voice *tts.Speaker
-	// speakReply synthesizes `text` via the configured TTS endpoint and
-	// plays it. Both the HTTP call and the playback are off the critical
-	// path — TTS failure must never clobber the visible chat state, so
-	// errors only surface via the status bar and the conversation keeps
-	// flowing as if TTS wasn't there.
-	type ttsResult struct {
-		audio []byte
-		err   error
-	}
-	// speakReply synthesizes and plays `text`, then calls onDone (when set)
-	// exactly once on the Qt main thread. onDone fires after playback ends
-	// naturally, or immediately when TTS is disabled / empty / fails — so a
-	// caller chaining off it (continuous-conversation mode) advances no
-	// matter which path TTS takes. `ctx` carries the parent turn span so the
-	// emitted tts.synthesize span nests under chat.turn.
-	speakReply := func(ctx context.Context, text string, onDone func()) {
-		finish := func() {
-			if onDone != nil {
-				onDone()
-			}
-		}
-		s := settings.Load()
-		if !s.EnableTTS || strings.TrimSpace(text) == "" {
-			finish()
-			return
-		}
-		ep := util.FirstNonEmpty(s.TTSEndpoint, s.APIEndpoint)
-		key := util.FirstNonEmpty(s.TTSAPIKey, s.APIKey)
-		util.PollAsync(30,
-			func() ttsResult {
-				data, err := tts.Synthesize(ctx, ep, key, s.TTSModel, s.TTSVoice, text)
-				return ttsResult{data, err}
-			},
-			func(r ttsResult) {
-				if r.err != nil {
-					setStatus("✗ TTS: " + r.err.Error())
-					finish()
-					return
-				}
-				// Replace any prior playback so two replies don't pile
-				// up — easy to hit by retrying or sending fast.
-				if voice != nil {
-					voice.Stop()
-				}
-				sp, err := tts.Play(ctx, r.audio)
-				if err != nil {
-					setStatus("✗ TTS: " + err.Error())
-					finish()
-					return
-				}
-				// finish() runs when playback drains on its own, not when
-				// a later Stop cancels it — see Speaker.OnDone.
-				sp.OnDone = finish
-				voice = sp
-			})
-	}
+	// Voice state has to live outside the hub — the hub doesn't care
+	// where a turn came from, only the desktop subscriber does. We track
+	// the most recent desktop send so the continuous-conversation loop
+	// only re-arms the mic for voice-originated turns.
+	var (
+		lastDesktopWasVoice bool
+		voice               *tts.Speaker
+		rec                 *audio.Recorder
+	)
 
-	// generatePortrait renders a fresh character portrait via ComfyUI and
-	// drops it into the side panel. Like speakReply it's best-effort and
-	// off the critical path — a render failure only touches the status bar,
-	// the chat keeps flowing. A no-op unless image generation is enabled in
-	// Settings. comfyui.Generate picks a new random seed each call, so
-	// calling this after every reply yields a new image rather than the
-	// same one.
-	//
-	// `emotion` (from the structured chat reply) is spliced into the image
-	// prompt by looking up chat.EmotionPrompts so the portrait matches the
-	// reply's mood. Empty/neutral falls through unchanged. `naked` is the
-	// per-turn nudity flag from the same reply; when true it appends the
-	// nudity fragment so the renderer drops the character's clothing.
-	//
-	// Streaming: comfyui.Generate reports step progress and preview frames
-	// over a buffered channel; the QTimer drains both, repainting the
-	// portrait pane as preview frames arrive. Step counts are received
-	// but currently unused — kept on the channel in case we want to show
-	// them again later.
-	type imageResult struct {
-		png []byte
-		err error
-	}
-	// `ctx` carries the parent turn span so the image.generate span nests
-	// under chat.turn. `onDone` fires exactly once (on the Qt main thread)
-	// when the render finishes — success, failure, or the no-op "image gen
-	// disabled" early return — so the caller can clear an outstanding-work
-	// counter for the turn span without caring which path was taken.
-	generatePortrait := func(ctx context.Context, emotion string, naked bool, onDone func()) {
-		finish := func() {
-			if onDone != nil {
-				onDone()
-			}
-		}
-		s := settings.Load()
-		if !s.EnableImageGen {
-			finish()
-			return
-		}
-		prompt := strings.TrimSpace(s.ImagePrompt)
-		// Clothing and nudity are mutually exclusive — splicing both would
-		// pull the renderer in two directions. naked=true wins. Both
-		// strings come from Settings so the user can retune them; either
-		// blank means "skip the splice".
-		switch {
-		case naked:
-			if frag := strings.TrimSpace(s.ImageNudity); frag != "" {
-				prompt = prompt + ", " + frag
-			}
-		default:
-			if frag := strings.TrimSpace(s.ImageClothing); frag != "" {
-				prompt = prompt + ", " + frag
-			}
-		}
-		if frag := chat.EmotionPrompts[strings.TrimSpace(emotion)]; frag != "" {
-			prompt = prompt + ", " + frag
-		}
-		setStatus("Rendering portrait…")
-
-		// Buffer the progress channel generously: preview frames are
-		// large and arrive faster than the QTimer drains. Dropping the
-		// odd preview is fine; missing the final image is not — that
-		// goes through `done` instead.
-		done := make(chan imageResult, 1)
-		progress := make(chan comfyui.Progress, 32)
-		go func() {
-			png, err := comfyui.Generate(ctx, s, prompt, s.ImageNegativePrompt, naked, func(p comfyui.Progress) {
-				select {
-				case progress <- p:
-				default:
-					// Buffer full — drop. UI catches up on next event.
-				}
-			})
-			done <- imageResult{png, err}
-		}()
-		// Tighter poll than the previous 250ms because previews come in
-		// every step or two and the UI feels laggy otherwise.
-		poller := qt.NewQTimer()
-		poller.SetSingleShot(false)
-		poller.OnTimeout(func() {
-			// Drain any queued progress events first so the most recent
-			// preview / step counter wins this tick.
-		drain:
-			for {
-				select {
-				case p := <-progress:
-					if len(p.Preview) > 0 {
-						showPortrait(p.Preview, false)
-					}
-				default:
-					break drain
-				}
-			}
-			select {
-			case r := <-done:
-				poller.Stop()
-				if r.err != nil {
-					setStatus("✗ Portrait: " + r.err.Error())
-					finish()
-					return
-				}
-				showPortrait(r.png, true)
-				if err := comfyui.SaveCharacterImage(r.png); err != nil {
-					setStatus("✗ Could not cache portrait: " + err.Error())
-					finish()
-					return
-				}
-				setStatus("Ready")
-				finish()
-			default:
-			}
-		})
-		poller.Start(80)
-	}
-
-	// sendMessage and startListening are mutually recursive — a hands-free
-	// voice turn flows sendMessage → reply → startListening → transcribe →
-	// sendMessage — so both are declared up front and assigned below.
-	// sendMessage's viaVoice flag records whether the turn originated from
-	// the mic; only voice turns re-arm the continuous-conversation loop.
-	var sendMessage func(viaVoice bool)
+	// startListening / sendDesktopMessage are mutually recursive (voice
+	// → reply → listen again). Declared up front, assigned below.
 	var startListening func()
-	sendMessage = func(viaVoice bool) {
-		text := strings.TrimSpace(message.Text())
-		if text == "" {
-			return
-		}
-		message.Clear()
-		chat.AppendTurn(transcript, "You", text, labelRed)
-		history = append(history, chat.Message{Role: chat.RoleUser, Content: text, Timestamp: time.Now()})
 
-		sendBtn.SetEnabled(false)
-		message.SetEnabled(false)
-		setStatus("Sending…")
-
-		// Snapshot history + settings so the goroutine never reads state
-		// the main thread might mutate. (Input is disabled, but defensive.)
-		s := settings.Load()
-		snapshot := append([]chat.Message(nil), history...)
-
-		// Parent span for the whole turn — covers chat, TTS, and portrait so
-		// a single trace shows the user-perceived latency end-to-end. Ends
-		// only after every child operation reports done; `pending` tracks
-		// the outstanding count and is mutated only from the Qt main thread
-		// (every callback below runs there).
-		turnCtx, turnSpan := tracing.StartSpan(context.Background(), "chat.turn",
-			attribute.Bool("turn.via_voice", viaVoice),
-			attribute.Bool("turn.continuous", s.ContinuousConversation),
-			attribute.Int("turn.history.messages", len(snapshot)),
-		)
-		pending := 1
-		endChild := func() {
-			pending--
-			if pending == 0 {
-				turnSpan.End()
-			}
-		}
-
-		util.PollAsync(30,
-			func() chatResult {
-				reply, usage, err := chat.Completion(turnCtx, s, snapshot)
-				return chatResult{reply, usage, err}
-			},
-			func(r chatResult) {
-				sendBtn.SetEnabled(true)
-				message.SetEnabled(true)
-				message.QWidget.SetFocus()
-				if r.err != nil {
-					setStatus("✗ " + r.err.Error())
-					chat.AppendTurn(transcript, "Error", r.err.Error(), labelRed)
-					// Drop the user turn so the next send isn't replayed
-					// with a half-finished exchange in history.
-					history = history[:len(history)-1]
-					persistConversation(turnCtx)
-					turnSpan.RecordError(r.err)
-					turnSpan.SetStatus(codes.Error, r.err.Error())
-					endChild()
-					return
-				}
-				// Only the text goes into history/transcript — the emotion
-				// is consumed locally by the portrait pipeline and isn't
-				// worth replaying back to the model on the next turn.
-				history = append(history, chat.Message{Role: chat.RoleAssistant, Content: r.reply.Text, Timestamp: time.Now()})
-				chat.AppendTurn(transcript, "Diesel", r.reply.Text, labelBlue)
-				persistConversation(turnCtx)
-				setStatus("Ready")
-				// Prefer the server-reported total; fall back to summing
-				// the prompt+completion fields when only those are set
-				// (some llama.cpp builds report the parts but not the
-				// total). Skip the update entirely when the server didn't
-				// include a usage block — leaving the prior value in
-				// place reads better than flashing to 0.
-				total := r.usage.TotalTokens
-				if total == 0 {
-					total = r.usage.PromptTokens + r.usage.CompletionTokens
-				}
-				if total > 0 {
-					tokensLabel.SetText(fmt.Sprintf("%d msgs · %d tokens", len(history), total))
-				}
-				// Continuous-conversation mode reopens the mic once the
-				// reply finishes being spoken — but only for voice turns,
-				// so typing a message never silently arms the mic.
-				var afterSpeak func()
-				if s.ContinuousConversation && viaVoice {
-					afterSpeak = startListening
-				}
-				// Bump pending for TTS + portrait before kicking either
-				// off — both callbacks could fire synchronously on the
-				// disabled/no-op paths, and we need the count to be
-				// accurate before that happens.
-				pending += 2
-				speakReply(turnCtx, r.reply.Text, func() {
-					if afterSpeak != nil {
-						afterSpeak()
-					}
-					endChild()
-				})
-				// Refresh Diesel's portrait to match the reply's mood —
-				// the emotion is spliced into the image prompt below.
-				generatePortrait(turnCtx, r.reply.Emotion, r.reply.Naked, endChild)
-				endChild() // chat reply done
-			})
-	}
-	sendBtn.OnClicked(func() { sendMessage(false) })
-	message.OnReturnPressed(func() { sendMessage(false) })
-
-	// ─── Record button + VAD ──────────────────────────────────────────────
-	// Press once to start capturing from the default microphone. The VAD
-	// auto-stops on trailing silence (or a hard 30 s ceiling); a second
-	// press cancels mid-recording. On stop we POST the audio to the
-	// configured STT endpoint and, on success, auto-send the transcript
-	// as a chat turn so the workflow stays hands-free.
-	var rec *audio.Recorder
 	const (
 		recordGlyphIdle   = "◉"
 		recordGlyphActive = "⏹"
 	)
-	type sttResult struct {
-		text string
-		err  error
-	}
 	setRecordingUI := func(active bool) {
 		if active {
 			recordBtn.SetText(recordGlyphActive)
-			// Upload button doubles as the commit/send action while a
-			// recording is in flight: ⏹ cancels, ↑ commits. Both stay
-			// enabled so the user always has both choices.
 			uploadBtn.SetEnabled(true)
 			message.SetEnabled(false)
 			sendBtn.SetEnabled(false)
@@ -676,24 +330,139 @@ func main() {
 			sendBtn.SetEnabled(true)
 		}
 	}
-	// startListening opens the mic and wires up the VAD. Extracted from the
-	// record button so continuous-conversation mode can reopen the mic with
-	// no click — it's a no-op if a recording is already in progress.
+
+	sendDesktopMessage := func(text string, viaVoice bool) {
+		text = strings.TrimSpace(text)
+		if text == "" {
+			return
+		}
+		message.Clear()
+		lastDesktopWasVoice = viaVoice
+		if err := h.Send(context.Background(), text, desktopOrigin); err != nil {
+			setStatus("✗ " + err.Error())
+		}
+	}
+
+	// dispatchEvent runs on the Qt main thread (called from the drain
+	// timer). Every Qt-touching update for the desktop UI flows through
+	// here. It's safe to call settings.Load(), tts.Play, comfyui state
+	// readers, etc. from within.
+	dispatchEvent := func(ev hub.Event) {
+		switch ev.Type {
+		case hub.EventTurnStarted:
+			if ev.User != nil {
+				chat.AppendTurn(transcript, "You", ev.User.Content, labelRed)
+			}
+			// Lock the UI regardless of origin — only one turn runs at
+			// a time, so remote-initiated turns should also disable our
+			// Send button to keep the user from racing.
+			sendBtn.SetEnabled(false)
+			message.SetEnabled(false)
+		case hub.EventTurnComplete:
+			if ev.Assistant != nil {
+				chat.AppendTurn(transcript, "Diesel", ev.Assistant.Content, labelBlue)
+			}
+			sendBtn.SetEnabled(true)
+			message.SetEnabled(true)
+			message.QWidget.SetFocus()
+			if ev.Usage != nil {
+				total := ev.Usage.TotalTokens
+				if total == 0 {
+					total = ev.Usage.PromptTokens + ev.Usage.CompletionTokens
+				}
+				if total > 0 {
+					tokensLabel.SetText(fmt.Sprintf("%d msgs · %d tokens", len(h.History()), total))
+				}
+			}
+			if ev.PortraitURL != "" {
+				id := strings.TrimPrefix(ev.PortraitURL, "/api/portrait/")
+				if data, ok := h.Portrait(id); ok {
+					showPortrait(data)
+				}
+			}
+			// Last-active wins: only play TTS if this turn was ours.
+			if ev.Origin == desktopOrigin {
+				armNext := func() {
+					if lastDesktopWasVoice && settings.Load().ContinuousConversation {
+						startListening()
+					}
+					lastDesktopWasVoice = false
+				}
+				if ev.AudioURL != "" {
+					id := strings.TrimPrefix(ev.AudioURL, "/api/audio/")
+					if data, ok := h.Audio(id); ok && len(data) > 0 {
+						if voice != nil {
+							voice.Stop()
+						}
+						sp, err := tts.Play(context.Background(), data)
+						if err != nil {
+							setStatus("✗ TTS: " + err.Error())
+							armNext()
+							return
+						}
+						sp.OnDone = armNext
+						voice = sp
+						return
+					}
+				}
+				// No audio (TTS off, synth failed, or cache miss).
+				armNext()
+			}
+		case hub.EventTurnError:
+			if ev.Origin == desktopOrigin {
+				chat.AppendTurn(transcript, "Error", ev.Error, labelRed)
+				lastDesktopWasVoice = false
+			}
+			sendBtn.SetEnabled(true)
+			message.SetEnabled(true)
+		case hub.EventStatus:
+			setStatus(ev.Status)
+		case hub.EventCleared:
+			transcript.Clear()
+			tokensLabel.SetText("")
+		case hub.EventBusy:
+			setStatus("Busy — wait for the current reply to finish.")
+		}
+	}
+
+	// Drain pump. 30 ms cadence matches the rest of the codebase's
+	// PollAsync default and is fast enough that status updates feel
+	// instant.
+	drain := qt.NewQTimer()
+	drain.SetSingleShot(false)
+	drain.OnTimeout(func() {
+		for {
+			select {
+			case ev, ok := <-desktopSub.Events:
+				if !ok {
+					drain.Stop()
+					return
+				}
+				dispatchEvent(ev)
+			default:
+				return
+			}
+		}
+	})
+	drain.Start(30)
+
+	sendBtn.OnClicked(func() { sendDesktopMessage(message.Text(), false) })
+	message.OnReturnPressed(func() { sendDesktopMessage(message.Text(), false) })
+
+	// ─── Record button + VAD ──────────────────────────────────────────────
+	type sttResult struct {
+		text string
+		err  error
+	}
 	startListening = func() {
 		if rec != nil {
 			return
 		}
-		// Don't let Diesel talk over the user. If a previous reply is
-		// still being spoken, stop it before we open the mic — otherwise
-		// the VAD picks up the playback and trims the user's speech.
 		if voice != nil {
 			voice.Stop()
 			voice = nil
 		}
 		r, err := audio.StartRecording(context.Background(), func(pcm []byte, reason audio.StopReason) {
-			// onStop runs on the Qt main thread, either from VAD or
-			// from a manual cancel. Reset UI first, then decide
-			// whether to transcribe.
 			rec = nil
 			setRecordingUI(false)
 			if reason == audio.StopCancelled {
@@ -704,8 +473,6 @@ func main() {
 				setStatus("No speech detected")
 				return
 			}
-			// StopVAD / StopMaxLength / StopCommitted all fall through to
-			// transcription — the audio is wanted.
 			setStatus("Transcribing…")
 			s := settings.Load()
 			ep := util.FirstNonEmpty(s.STTEndpoint, s.APIEndpoint)
@@ -726,9 +493,7 @@ func main() {
 						return
 					}
 					message.SetText(r.text)
-					// viaVoice=true: this turn came from the mic, so it
-					// re-arms the continuous-conversation loop.
-					sendMessage(true)
+					sendDesktopMessage(r.text, true)
 				})
 		})
 		if err != nil {
@@ -741,18 +506,11 @@ func main() {
 	}
 	recordBtn.OnClicked(func() {
 		if rec != nil {
-			// Already recording → treat as cancel. The onStop callback
-			// will reset UI state.
 			rec.Stop(audio.StopCancelled)
 			return
 		}
 		startListening()
 	})
-	// Upload button's role during recording is "commit and send" — it
-	// stops the recording with StopCommitted, which the onStop handler
-	// above treats the same as a VAD-driven stop (transcribe + auto-send).
-	// When no recording is active the button is reserved for file upload,
-	// which isn't wired yet, so it's a no-op for now.
 	uploadBtn.OnClicked(func() {
 		if rec != nil {
 			rec.Stop(audio.StopCommitted)
@@ -760,21 +518,16 @@ func main() {
 	})
 
 	// ─── Menu bar ─────────────────────────────────────────────────────────
-	// macOS reroutes this into the native menu bar at the screen top; on
-	// Linux/Windows it renders inside the window.
 	mb := window.MenuBar()
 	fileMenu := mb.AddMenuWithTitle("File")
 
 	newAction := fileMenu.AddAction3(
 		"New Conversation",
-		qt.NewQKeySequence6(qt.QKeySequence__New), // Cmd+N / Ctrl+N
+		qt.NewQKeySequence6(qt.QKeySequence__New),
 	)
-	// Diesel holds a single conversation, so "New" means discarding the
-	// current one. Confirm first — the transcript and in-memory history are
-	// both wiped, with no undo.
 	newAction.OnTriggered(func() {
-		if transcript.ToPlainText() == "" && len(history) == 0 {
-			return // nothing to erase
+		if transcript.ToPlainText() == "" && len(h.History()) == 0 {
+			return
 		}
 		answer := qt.QMessageBox_Question6(
 			window.QWidget,
@@ -786,31 +539,31 @@ func main() {
 		if answer != qt.QMessageBox__Yes {
 			return
 		}
-		transcript.Clear()
-		history = nil
-		persistConversation(context.Background())
-		tokensLabel.SetText("")
-		setStatus("Ready")
+		if err := h.Clear(context.Background()); err != nil {
+			setStatus("✗ " + err.Error())
+		}
 	})
 
-	// Settings — flagged with PreferencesRole so Qt moves it to the
-	// application menu on macOS (the "diesel" / "Audio App" menu next to
-	// the Apple logo). On other platforms it stays under File.
 	prefsAction := qt.NewQAction2("Settings…")
 	prefsAction.SetMenuRole(qt.QAction__PreferencesRole)
 	prefsAction.OnTriggered(func() {
-		showSettingsDialog(window.QWidget)
+		showSettingsDialog(window.QWidget, srvMgr)
 	})
 	fileMenu.AddAction(prefsAction)
 
 	window.Show()
 	qt.QApplication_Exec()
+
+	// Tear down the hub subscription on quit. Stop the server first so
+	// no in-flight WS handlers try to use a half-torn-down hub.
+	srvMgr.Stop()
+	h.Unsubscribe(desktopOrigin)
+	h.Stop()
 }
 
 // showPortraitFullSize pops a modal viewer with the portrait scaled to
-// fill the screen's available height. The dialog's width follows from the
-// image's aspect ratio at that height, so the window stays just as wide
-// as the picture itself — no letterboxing, no extra chrome around it.
+// fill the screen's available height. The dialog's width follows from
+// the image's aspect ratio at that height.
 func showPortraitFullSize(parent *qt.QWidget, png []byte) {
 	pm := qt.NewQPixmap()
 	if !pm.LoadFromDataWithData(png) || pm.IsNull() {
@@ -820,9 +573,6 @@ func showPortraitFullSize(parent *qt.QWidget, png []byte) {
 	w, h := pm.Width(), pm.Height()
 	if screen := qt.QGuiApplication_PrimaryScreen(); screen != nil && h > 0 {
 		avail := screen.AvailableGeometry()
-		// Scale by height to fill the screen vertically; width tracks
-		// the aspect ratio. Clamp if that makes the dialog wider than
-		// the screen (very wide / panoramic images).
 		w = w * avail.Height() / h
 		h = avail.Height()
 		if w > avail.Width() {
@@ -830,23 +580,9 @@ func showPortraitFullSize(parent *qt.QWidget, png []byte) {
 			w = avail.Width()
 		}
 		pm = pm.Scaled3(w, h, qt.KeepAspectRatio, qt.SmoothTransformation)
-		// Use the post-scale pixmap dimensions so the dialog matches
-		// the image exactly — Scaled3 with KeepAspectRatio can round
-		// off a pixel or two, which leaves a 1px gap otherwise.
 		w, h = pm.Width(), pm.Height()
 	}
 
-	// Popup window type: frameless, no taskbar entry, and auto-closes
-	// when the user clicks anywhere outside it — which is the exact
-	// dismissal behavior we want here. FramelessWindowHint and
-	// CustomizeWindowHint are kept as belt-and-suspenders so Qt can't
-	// sneak any default title chrome back in on macOS. The label is
-	// parented directly to the dialog with absolute geometry rather
-	// than via a QVBoxLayout — no layout we tried reliably zeroed out
-	// the top gap. Stylesheet override + SetFixedSize keep any residual
-	// gap from rendering as a visible grey bar against the inherited
-	// dark theme. Escape (QDialog default) and a click inside both
-	// close it too.
 	dlg := qt.NewQDialog(parent)
 	dlg.SetWindowFlags(qt.Popup | qt.FramelessWindowHint | qt.CustomizeWindowHint)
 	dlg.SetWindowTitle("Diesel")
@@ -866,8 +602,9 @@ func showPortraitFullSize(parent *qt.QWidget, png []byte) {
 }
 
 // showSettingsDialog presents a modal settings dialog populated from the
-// on-disk settings file. Save writes them back; Cancel discards.
-func showSettingsDialog(parent *qt.QWidget) {
+// on-disk settings file. Save writes them back and applies any server
+// config changes to srvMgr; Cancel discards.
+func showSettingsDialog(parent *qt.QWidget, srvMgr *server.Manager) {
 	current := settings.Load()
 
 	dlg := qt.NewQDialog(parent)
@@ -878,13 +615,6 @@ func showSettingsDialog(parent *qt.QWidget) {
 	root.SetContentsMargins(18, 18, 18, 14)
 	root.SetSpacing(12)
 
-	// Each settings tab is a QFormLayout hosted on a QWidget, wrapped in a
-	// QScrollArea so tall content (the prompt editors, mainly) can grow
-	// past the dialog height and the user scrolls instead of the dialog
-	// stretching. SetWidgetResizable(true) lets the inner widget track the
-	// viewport width — without it, fields would clip horizontally instead
-	// of growing to fill the tab. Spacing and growth policy are shared so
-	// non-fixed fields fill the available horizontal space.
 	newTab := func() (*qt.QFormLayout, *qt.QWidget) {
 		f := qt.NewQFormLayout2()
 		f.SetSpacing(10)
@@ -909,14 +639,8 @@ func showSettingsDialog(parent *qt.QWidget) {
 	apiKey.SetEchoMode(qt.QLineEdit__Password)
 	apiKey.SetPlaceholderText("sk-…")
 
-	// Model selectors share a fixed width so the form stays stable: an
-	// editable combo otherwise sizes itself to its longest entry, and
-	// model IDs vary wildly in length between providers.
 	const modelComboWidth = 280
 
-	// The model list is populated live from the configured provider rather
-	// than hardcoded. Editable so the user can still type a custom name if
-	// the server doesn't advertise the one they want.
 	model := qt.NewQComboBox(nil)
 	model.SetEditable(true)
 	model.SetFixedWidth(modelComboWidth)
@@ -927,11 +651,7 @@ func showSettingsDialog(parent *qt.QWidget) {
 	}
 	loadModels(current.APIEndpoint, current.APIKey)
 
-	// Audio devices, enumerated from Qt's multimedia subsystem. "System
-	// Default" stays as the first option (and the fallback) so users
-	// don't have to pick a specific device just to get going. The output
-	// list is also enumerated for symmetry, even though we don't play
-	// audio yet — output device wiring is a follow-up.
+	// Audio devices.
 	inputDevice := qt.NewQComboBox(nil)
 	inputDevice.AddItem("System Default")
 	for _, d := range audio.InputDescriptions() {
@@ -945,25 +665,16 @@ func showSettingsDialog(parent *qt.QWidget) {
 	}
 	setComboSelection(outputDevice, current.OutputDevice)
 
-	// Speech-to-text settings. All three fields are optional and fall
-	// back to their LLM counterparts at request time, so a user pointing
-	// a single Speaches/LM-Studio server at both can leave them blank.
+	// STT settings.
 	sttEndpoint := qt.NewQLineEdit3(current.STTEndpoint)
 	sttEndpoint.SetPlaceholderText("(falls back to API endpoint)")
 	sttAPIKey := qt.NewQLineEdit3(current.STTAPIKey)
 	sttAPIKey.SetEchoMode(qt.QLineEdit__Password)
 	sttAPIKey.SetPlaceholderText("(falls back to API key)")
-	// Editable combo so the user can still type a custom name when the
-	// server doesn't enumerate one. Populated live from the STT endpoint
-	// (or the LLM endpoint when STT is left blank) — Speaches advertises
-	// ASR models via /v1/models, which is enough to fill the dropdown.
 	sttModel := qt.NewQComboBox(nil)
 	sttModel.SetEditable(true)
 	sttModel.SetFixedWidth(modelComboWidth)
 	sttModel.LineEdit().SetPlaceholderText("whisper-1")
-	// loadSTTModels falls back to the LLM endpoint/key when the STT-specific
-	// ones are blank — mirrors the precedence used at record time, so the
-	// dropdown shows what would actually be queried.
 	loadSTTModels := func(ep, key string) {
 		ep = util.FirstNonEmpty(ep, endpoint.Text())
 		key = util.FirstNonEmpty(key, apiKey.Text())
@@ -972,10 +683,6 @@ func showSettingsDialog(parent *qt.QWidget) {
 		})
 	}
 	loadSTTModels(current.STTEndpoint, current.STTAPIKey)
-	// Debounced refresh — same shape as the system-prompt token counter
-	// above. Triggered when the user edits either the STT endpoint/key
-	// directly, or the LLM endpoint/key while the STT ones are blank
-	// (because the loader falls back to those).
 	sttModelTimer := qt.NewQTimer()
 	sttModelTimer.SetSingleShot(true)
 	sttModelTimer.OnTimeout(func() {
@@ -984,9 +691,7 @@ func showSettingsDialog(parent *qt.QWidget) {
 	sttEndpoint.OnTextChanged(func(string) { sttModelTimer.Start(400) })
 	sttAPIKey.OnTextChanged(func(string) { sttModelTimer.Start(400) })
 
-	// Text-to-speech settings. Symmetric to STT, plus a Voice field —
-	// every modern TTS model serves multiple voices, and the choice is
-	// per-request rather than baked into the model.
+	// TTS settings.
 	enableTTS := qt.NewQCheckBox3("Speak replies through TTS")
 	enableTTS.SetChecked(current.EnableTTS)
 	ttsEndpoint := qt.NewQLineEdit3(current.TTSEndpoint)
@@ -1016,23 +721,12 @@ func showSettingsDialog(parent *qt.QWidget) {
 	ttsVoice := qt.NewQLineEdit3(current.TTSVoice)
 	ttsVoice.SetPlaceholderText("alloy")
 
-	// System prompt — multi-line, sent as the leading "system" message in
-	// every LLM call. QTextEdit (rather than QLineEdit) so long prompts
-	// stay readable. No max height so it expands to fill whatever vertical
-	// space the LLM tab has spare; the minimum keeps ~4 lines visible even
-	// on a tiny dialog.
+	// System prompt.
 	systemPrompt := qt.NewQTextEdit(nil)
 	systemPrompt.SetPlaceholderText("Instructions sent to the model before each conversation…")
 	systemPrompt.SetPlainText(current.SystemPrompt)
 	systemPrompt.SetMinimumHeight(96)
 
-	// Approximate token count, right-aligned under the editor. Pure local
-	// chars/4 heuristic — no server roundtrip, no async upgrade. An earlier
-	// version called the server's tokenize endpoint and fell back to this
-	// estimate on failure, but the exact-count path sometimes returned 0
-	// for non-empty input and caused the label to flicker to "0 tokens"
-	// mid-edit. A pure estimate is stable, instant, and accurate enough
-	// for sizing a prompt at a glance.
 	tokenCount := qt.NewQLabel5("", nil)
 	tokenCount.SetStyleSheet("color: #888; font-size: 11px;")
 	tokenCount.SetAlignment(qt.AlignRight | qt.AlignVCenter)
@@ -1051,12 +745,7 @@ func showSettingsDialog(parent *qt.QWidget) {
 	systemPrompt.OnTextChanged(updateTokenCount)
 	updateTokenCount()
 
-	// Context window — read-only, fetched from the server. OpenAI-compat
-	// endpoints don't expose this, so settings.FetchModelContextLength
-	// probes each known backend's native endpoint (LM Studio
-	// /api/v0/models, llama.cpp /props, Ollama /api/show). A debounce
-	// timer coalesces the rapid refreshes triggered by typing in
-	// endpoint/key/model.
+	// Context length.
 	contextLabel := qt.NewQLabel5("—", nil)
 	contextLabel.SetStyleSheet("color: #888;")
 	refreshContext := func() {
@@ -1080,16 +769,8 @@ func showSettingsDialog(parent *qt.QWidget) {
 	contextTimer.SetSingleShot(true)
 	contextTimer.OnTimeout(refreshContext)
 	model.OnCurrentTextChanged(func(string) { contextTimer.Start(400) })
-	// Kick off an initial probe so the label populates without waiting for
-	// the user to touch any field. Goes through the timer so a flurry of
-	// programmatic field assignments (none yet, but cheap insurance) collapses.
 	contextTimer.Start(0)
 
-	// Refetch the STT/TTS model dropdowns when the LLM endpoint/key change,
-	// but only while the STT/TTS-specific fields are blank — that's when
-	// loadSTTModels / loadTTSModels fall back to these as the source. The
-	// context-length probe always refreshes since it follows the LLM
-	// endpoint/key directly.
 	endpoint.OnTextChanged(func(string) {
 		if strings.TrimSpace(sttEndpoint.Text()) == "" {
 			sttModelTimer.Start(400)
@@ -1109,7 +790,7 @@ func showSettingsDialog(parent *qt.QWidget) {
 		contextTimer.Start(400)
 	})
 
-	// History length. 0 means "no history; only send the latest message".
+	// History length.
 	historyMessages := qt.NewQSpinBox(nil)
 	historyMessages.SetRange(0, 500)
 	historyMessages.SetSingleStep(1)
@@ -1120,16 +801,9 @@ func showSettingsDialog(parent *qt.QWidget) {
 	autoSave := qt.NewQCheckBox3("Save conversations to disk")
 	autoSave.SetChecked(current.SaveToDisk)
 
-	// Continuous conversation: after a spoken turn gets a reply, reopen the
-	// mic automatically so a voice chat flows hands-free. Typed turns are
-	// unaffected. Lives in the STT section because it governs the listening
-	// loop, even though the reply that triggers it may be spoken via TTS.
 	continuousConv := qt.NewQCheckBox3("Continuous conversation (keep listening after each reply)")
 	continuousConv.SetChecked(current.ContinuousConversation)
 
-	// makeTestRow builds a {button | status-label} row for the bottom of
-	// each section. The button reads the *current* field values so users
-	// can try edits without saving first.
 	makeTestRow := func(label string) (*qt.QHBoxLayout, *qt.QPushButton, *qt.QLabel) {
 		row := qt.NewQHBoxLayout2()
 		btn := qt.NewQPushButton3(label)
@@ -1140,9 +814,7 @@ func showSettingsDialog(parent *qt.QWidget) {
 		return row, btn, status
 	}
 
-	// LLM test: probe /models on the configured endpoint and report what
-	// came back. Sync HTTP call; ProcessEvents pumps the loop so the
-	// "Testing…" state actually paints before the call blocks the UI thread.
+	// LLM test.
 	llmTestRow, llmTestBtn, llmTestStatus := makeTestRow("Test connection")
 	llmTestBtn.OnClicked(func() {
 		llmTestBtn.SetEnabled(false)
@@ -1150,12 +822,6 @@ func showSettingsDialog(parent *qt.QWidget) {
 		qt.QCoreApplication_ProcessEvents()
 		result := settings.TestLLMConnection(endpoint.Text(), apiKey.Text())
 		llmTestStatus.SetText(result)
-		// On success, refresh the model list against the just-validated
-		// endpoint/key so the user sees the new options without reopening.
-		// The STT/TTS pickers refresh alongside it because both fall back
-		// to the same endpoint/key when their dedicated fields are blank.
-		// Context-length probe re-runs too so it tracks the freshly-loaded
-		// model state.
 		if strings.HasPrefix(result, "✓") {
 			loadModels(endpoint.Text(), apiKey.Text())
 			loadSTTModels(sttEndpoint.Text(), sttAPIKey.Text())
@@ -1165,12 +831,7 @@ func showSettingsDialog(parent *qt.QWidget) {
 		llmTestBtn.SetEnabled(true)
 	})
 
-	// STT test: probe the STT endpoint's /models list, mirroring the
-	// runtime fallback to the LLM endpoint/key when the STT-specific
-	// fields are blank. A reachable /models is necessary but not
-	// sufficient for transcription to work — a real round-trip test
-	// would need to record audio, which isn't worth wiring into a
-	// settings dialog.
+	// STT test.
 	sttTestRow, sttTestBtn, sttTestStatus := makeTestRow("Test connection")
 	sttTestBtn.OnClicked(func() {
 		sttTestBtn.SetEnabled(false)
@@ -1186,18 +847,12 @@ func showSettingsDialog(parent *qt.QWidget) {
 			sttTestStatus.SetText("✓ Connected, but the server returned no models.")
 		} else {
 			sttTestStatus.SetText(fmt.Sprintf("✓ Connected — %d model(s) available.", len(ids)))
-			// Refresh the dropdown to match the just-validated server.
 			loadSTTModels(sttEndpoint.Text(), sttAPIKey.Text())
 		}
 		sttTestBtn.SetEnabled(true)
 	})
 
-	// TTS test: synthesize a short phrase and play it through the
-	// configured output device. Doubles as a voice preview — far more
-	// useful than another /models probe, because it verifies the model
-	// name, the voice name, the synthesis pipeline, and audio playback
-	// all line up. testVoice tracks the playback so a re-click cleanly
-	// replaces it instead of stacking two phrases on top of each other.
+	// TTS test.
 	var testVoice *tts.Speaker
 	ttsTestRow, ttsTestBtn, ttsTestStatus := makeTestRow("Test voice")
 	ttsTestBtn.OnClicked(func() {
@@ -1232,8 +887,6 @@ func showSettingsDialog(parent *qt.QWidget) {
 		ttsTestStatus.SetText("✓ Speaking…")
 		ttsTestBtn.SetEnabled(true)
 	})
-	// Stop any in-flight test playback when the dialog closes — otherwise
-	// the speaker keeps running past Cancel/Save.
 	dlg.OnFinished(func(int) {
 		if testVoice != nil {
 			testVoice.Stop()
@@ -1241,27 +894,16 @@ func showSettingsDialog(parent *qt.QWidget) {
 		}
 	})
 
-	// Image generation (ComfyUI). There's no model picker — the checkpoint
-	// and every other model are baked into the bundled workflow. The prompt
-	// is multi-line (like the system prompt); the negative prompt is
-	// single-line since it's usually a short tag list.
+	// Image generation.
 	enableImageGen := qt.NewQCheckBox3("Render a character portrait after each reply")
 	enableImageGen.SetChecked(current.EnableImageGen)
 	comfyEndpoint := qt.NewQLineEdit3(current.ComfyUIEndpoint)
 	comfyEndpoint.SetPlaceholderText("http://127.0.0.1:8188")
 
-	// Both prompt editors are QTextEdits with a matching minimum height —
-	// in a QFormLayout, two rows that both have an expanding vertical size
-	// policy split the spare vertical space evenly, so they stay the same
-	// size as the tab grows.
 	imagePromptEdit := qt.NewQTextEdit(nil)
 	imagePromptEdit.SetPlaceholderText("How Diesel should look…")
 	imagePromptEdit.SetPlainText(current.ImagePrompt)
 	imagePromptEdit.SetMinimumHeight(240)
-	// Clothing and nudity are paired fields: the portrait pipeline
-	// splices one or the other depending on the chat reply's Naked
-	// flag. Multi-line QTextEdits sized for ~3 visible lines so the
-	// user can write longer tag lists without horizontal scrolling.
 	imageClothingEdit := qt.NewQTextEdit(nil)
 	imageClothingEdit.SetPlaceholderText("e.g. wearing a blue t-shirt and blue jeans")
 	imageClothingEdit.SetPlainText(current.ImageClothing)
@@ -1274,18 +916,12 @@ func showSettingsDialog(parent *qt.QWidget) {
 	imageNegEdit.SetPlaceholderText("things to keep out of the image")
 	imageNegEdit.SetPlainText(current.ImageNegativePrompt)
 	imageNegEdit.SetMinimumHeight(180)
-	// Sampler step count. The bundled workflow exposes a "Steps"
-	// PrimitiveInt that drives both the sampler's `steps` and
-	// `end_at_step` — more steps trade render time for quality.
 	imageSteps := qt.NewQSpinBox(nil)
 	imageSteps.SetRange(1, 200)
 	imageSteps.SetSingleStep(1)
 	imageSteps.SetSuffix(" steps")
 	imageSteps.SetValue(current.ImageSteps)
 
-	// Image test: hit ComfyUI's /system_stats and report the checkpoint
-	// count. A full render would be the stronger test, but it's slow and
-	// GPU-heavy — not something to fire from inside a settings dialog.
 	imgTestRow, imgTestBtn, imgTestStatus := makeTestRow("Test connection")
 	imgTestBtn.OnClicked(func() {
 		imgTestBtn.SetEnabled(false)
@@ -1295,7 +931,27 @@ func showSettingsDialog(parent *qt.QWidget) {
 		imgTestBtn.SetEnabled(true)
 	})
 
-	// LLM tab: chat endpoint, credentials, model choice, prompt, budgets.
+	// ─── Server tab ──────────────────────────────────────────────────────
+	// Mirror shape of the other service tabs: toggle, endpoint-ish config,
+	// optional secret, status row. The status label reflects the live
+	// state of srvMgr — refreshed on every Save and on dialog open so a
+	// stale "Stopped" never persists past an apply.
+	enableServer := qt.NewQCheckBox3("Enable HTTP server (remote web UI)")
+	enableServer.SetChecked(current.EnableServer)
+	serverExpose := qt.NewQCheckBox3("Expose to network (0.0.0.0) — otherwise loopback only")
+	serverExpose.SetChecked(current.ServerExposeNetwork)
+	serverPort := qt.NewQSpinBox(nil)
+	serverPort.SetRange(1, 65535)
+	serverPort.SetSingleStep(1)
+	serverPort.SetValue(current.ServerPort)
+	serverToken := qt.NewQLineEdit3(current.ServerAuthToken)
+	serverToken.SetEchoMode(qt.QLineEdit__Password)
+	serverToken.SetPlaceholderText("(blank = no auth — fine on loopback, risky on LAN)")
+	serverStatus := qt.NewQLabel5(srvMgr.Status(), nil)
+	serverStatus.SetWordWrap(true)
+	serverStatus.SetStyleSheet("color: #aaa;")
+
+	// LLM tab.
 	llmForm, llmTab := newTab()
 	llmForm.AddRow3("API endpoint:", endpoint.QWidget)
 	llmForm.AddRow3("API key:", apiKey.QWidget)
@@ -1305,9 +961,7 @@ func showSettingsDialog(parent *qt.QWidget) {
 	llmForm.AddRow3("Message history:", historyMessages.QWidget)
 	llmForm.AddRowWithLayout(llmTestRow.QLayout)
 
-	// Speech-to-Text tab: the mic pipeline. Endpoint/key are optional and
-	// fall back to the LLM ones at request time; the input device belongs
-	// here because it's the source of the audio being transcribed.
+	// STT tab.
 	sttForm, sttTab := newTab()
 	sttForm.AddRow3("Endpoint:", sttEndpoint.QWidget)
 	sttForm.AddRow3("API key:", sttAPIKey.QWidget)
@@ -1316,9 +970,7 @@ func showSettingsDialog(parent *qt.QWidget) {
 	sttForm.AddRowWithWidget(continuousConv.QWidget)
 	sttForm.AddRowWithLayout(sttTestRow.QLayout)
 
-	// Text-to-Speech tab: symmetric to STT, plus Voice and the toggle that
-	// gates auto-speak. The output device sits here because it's where the
-	// synthesized audio plays.
+	// TTS tab.
 	ttsForm, ttsTab := newTab()
 	ttsForm.AddRowWithWidget(enableTTS.QWidget)
 	ttsForm.AddRow3("Endpoint:", ttsEndpoint.QWidget)
@@ -1328,9 +980,7 @@ func showSettingsDialog(parent *qt.QWidget) {
 	ttsForm.AddRow3("Output device:", outputDevice.QWidget)
 	ttsForm.AddRowWithLayout(ttsTestRow.QLayout)
 
-	// Image Generation tab: the ComfyUI portrait pipeline. Enabled
-	// independently of the other services since it talks to a separate
-	// server; the prompt fields steer what Diesel looks like.
+	// Image tab.
 	imgForm, imgTab := newTab()
 	imgForm.AddRowWithWidget(enableImageGen.QWidget)
 	imgForm.AddRow3("ComfyUI endpoint:", comfyEndpoint.QWidget)
@@ -1341,9 +991,15 @@ func showSettingsDialog(parent *qt.QWidget) {
 	imgForm.AddRow3("Negative prompt:", imageNegEdit.QWidget)
 	imgForm.AddRowWithLayout(imgTestRow.QLayout)
 
-	// Appearance tab: app-level UI preferences that don't belong to any one
-	// service. Persisting conversations sits here because it's a global
-	// behavior toggle rather than something tied to LLM/STT/TTS.
+	// Server tab.
+	srvForm, srvTab := newTab()
+	srvForm.AddRowWithWidget(enableServer.QWidget)
+	srvForm.AddRowWithWidget(serverExpose.QWidget)
+	srvForm.AddRow3("Port:", serverPort.QWidget)
+	srvForm.AddRow3("Auth token:", serverToken.QWidget)
+	srvForm.AddRow3("Status:", serverStatus.QWidget)
+
+	// Appearance.
 	apForm, apTab := newTab()
 	apForm.AddRow3("Theme:", theme.QWidget)
 	apForm.AddRowWithWidget(autoSave.QWidget)
@@ -1353,11 +1009,10 @@ func showSettingsDialog(parent *qt.QWidget) {
 	tabs.AddTab(sttTab, "Speech-to-Text")
 	tabs.AddTab(ttsTab, "Text-to-Speech")
 	tabs.AddTab(imgTab, "Image Generation")
+	tabs.AddTab(srvTab, "Server")
 	tabs.AddTab(apTab, "Appearance")
 	root.AddWidget2(tabs.QWidget, 1)
 
-	// Standard Save / Cancel pair. Qt swaps button order to match the
-	// platform (macOS puts the affirmative button on the right).
 	buttons := qt.NewQDialogButtonBox4(
 		qt.QDialogButtonBox__Save | qt.QDialogButtonBox__Cancel,
 	)
@@ -1388,10 +1043,23 @@ func showSettingsDialog(parent *qt.QWidget) {
 			ImageNudity:            imageNudityEdit.ToPlainText(),
 			ImageNegativePrompt:    imageNegEdit.ToPlainText(),
 			ImageSteps:             imageSteps.Value(),
+			EnableServer:           enableServer.IsChecked(),
+			ServerExposeNetwork:    serverExpose.IsChecked(),
+			ServerPort:             serverPort.Value(),
+			ServerAuthToken:        serverToken.Text(),
 		}
 		if err := updated.Save(); err != nil {
 			qt.QMessageBox_Warning(parent, "Settings",
 				"Could not save settings:\n"+err.Error())
+			return
+		}
+		// Hot-restart the server against the new config. The status
+		// label updates so the user sees a failed bind without closing
+		// the dialog.
+		serverStatus.SetText(srvMgr.Apply(updated))
+		// If the apply failed, give the user a chance to fix it instead
+		// of closing the dialog out from under them.
+		if strings.HasPrefix(serverStatus.Text(), "✗") {
 			return
 		}
 		dlg.Accept()
@@ -1402,9 +1070,7 @@ func showSettingsDialog(parent *qt.QWidget) {
 	dlg.Exec()
 }
 
-// setComboSelection selects `value` in the combo if it's present, otherwise
-// leaves the current index alone. Avoids a noisy "0 means default" pattern
-// scattered through the call sites.
+// setComboSelection selects `value` in the combo if it's present.
 func setComboSelection(combo *qt.QComboBox, value string) {
 	if value == "" {
 		return
@@ -1417,11 +1083,8 @@ func setComboSelection(combo *qt.QComboBox, value string) {
 	}
 }
 
-// populateModelCombo replaces `combo`'s items with the IDs `fetch` reports
-// (sorted), then selects `saved` — adding it as an extra item when the
-// server didn't list it, so an offline-at-dialog-time provider doesn't lose
-// the user's prior choice. fetch errors are swallowed; the combo is still
-// repopulated with at least the saved value.
+// populateModelCombo replaces `combo`'s items with the IDs `fetch`
+// reports (sorted), then selects `saved`.
 func populateModelCombo(combo *qt.QComboBox, saved string, fetch func() ([]string, error)) {
 	combo.Clear()
 	if ids, err := fetch(); err == nil {
