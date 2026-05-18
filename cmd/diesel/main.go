@@ -1274,6 +1274,14 @@ func showSettingsDialog(parent *qt.QWidget) {
 	imageNegEdit.SetPlaceholderText("things to keep out of the image")
 	imageNegEdit.SetPlainText(current.ImageNegativePrompt)
 	imageNegEdit.SetMinimumHeight(180)
+	// Sampler step count. The bundled workflow exposes a "Steps"
+	// PrimitiveInt that drives both the sampler's `steps` and
+	// `end_at_step` — more steps trade render time for quality.
+	imageSteps := qt.NewQSpinBox(nil)
+	imageSteps.SetRange(1, 200)
+	imageSteps.SetSingleStep(1)
+	imageSteps.SetSuffix(" steps")
+	imageSteps.SetValue(current.ImageSteps)
 
 	// Image test: hit ComfyUI's /system_stats and report the checkpoint
 	// count. A full render would be the stronger test, but it's slow and
@@ -1326,6 +1334,7 @@ func showSettingsDialog(parent *qt.QWidget) {
 	imgForm, imgTab := newTab()
 	imgForm.AddRowWithWidget(enableImageGen.QWidget)
 	imgForm.AddRow3("ComfyUI endpoint:", comfyEndpoint.QWidget)
+	imgForm.AddRow3("Steps:", imageSteps.QWidget)
 	imgForm.AddRow3("Image prompt:", imagePromptEdit.QWidget)
 	imgForm.AddRow3("Clothing:", imageClothingEdit.QWidget)
 	imgForm.AddRow3("Nudity:", imageNudityEdit.QWidget)
@@ -1378,6 +1387,7 @@ func showSettingsDialog(parent *qt.QWidget) {
 			ImageClothing:          imageClothingEdit.ToPlainText(),
 			ImageNudity:            imageNudityEdit.ToPlainText(),
 			ImageNegativePrompt:    imageNegEdit.ToPlainText(),
+			ImageSteps:             imageSteps.Value(),
 		}
 		if err := updated.Save(); err != nil {
 			qt.QMessageBox_Warning(parent, "Settings",
