@@ -485,7 +485,7 @@ func main() {
 		done := make(chan imageResult, 1)
 		progress := make(chan comfyui.Progress, 32)
 		go func() {
-			png, err := comfyui.Generate(ctx, s, prompt, s.ImageNegativePrompt, func(p comfyui.Progress) {
+			png, err := comfyui.Generate(ctx, s, prompt, s.ImageNegativePrompt, naked, func(p comfyui.Progress) {
 				select {
 				case progress <- p:
 				default:

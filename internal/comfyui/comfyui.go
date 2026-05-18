@@ -188,10 +188,11 @@ type Progress struct {
 // intermediate preview frames as binary messages. It runs on the
 // goroutine driving Generate, so a Qt-thread caller should funnel
 // updates through a channel.
-func Generate(ctx context.Context, s settings.AppSettings, positive, negative string, onProgress func(Progress)) ([]byte, error) {
+func Generate(ctx context.Context, s settings.AppSettings, positive, negative string, naked bool, onProgress func(Progress)) ([]byte, error) {
 	ctx, span := tracing.StartSpan(ctx, "image.generate",
 		attribute.Int("image.prompt.length", len(positive)),
 		attribute.Int("image.negative_prompt.length", len(negative)),
+		attribute.Bool("image.naked", naked),
 	)
 	defer span.End()
 
@@ -237,12 +238,19 @@ func Generate(ctx context.Context, s settings.AppSettings, positive, negative st
 		return nil, fmt.Errorf("workflow: %w", err)
 	}
 	rewriteSpan.SetAttributes(attribute.String("workflow.sampler_id", samplerID))
+	nudityID := setNudity(graph, naked)
+	if nudityID != "" {
+		rewriteSpan.SetAttributes(attribute.String("workflow.nudity_id", nudityID))
+	}
 	rewriteSpan.End()
 	_ = rewriteCtx
 	span.SetAttributes(
 		attribute.Int64("image.seed", seed),
 		attribute.String("workflow.sampler_id", samplerID),
 	)
+	if nudityID != "" {
+		span.SetAttributes(attribute.String("workflow.nudity_id", nudityID))
+	}
 	// Stderr trace of what we're actually sending. Visible when Diesel is
 	// launched from a terminal, invisible in the packaged .app — useful
 	// for verifying the emotion splice without adding UI noise.
