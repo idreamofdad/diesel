@@ -158,7 +158,21 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
+    transition: background 120ms ease, border-color 120ms ease;
   }
-  .mic.recording { background: #7a3a3a; border-color: #a04a4a; }
+  /* Listening — mic open but no speech right now. Subtle border tint
+     so the user can see the mic is still on between utterances; the
+     bug we're fixing was that this state was indistinguishable from
+     idle, then ⏹ never came back for the next speech segment. */
+  .mic.listening {
+    background: #3a4a5a;
+    border-color: #5a7a9a;
+  }
+  /* Capturing — currently inside a speech segment. Red wins over the
+     listening tint via the source order. */
+  .mic.capturing {
+    background: #7a3a3a;
+    border-color: #a04a4a;
+  }
   .err { color: var(--accent-you); font-size: 0.85rem; margin-left: 0.5rem; }
 </style>
