@@ -1,4 +1,4 @@
-package main
+package settings
 
 import (
 	"encoding/json"
@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	"diesel/internal/util"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -29,13 +31,13 @@ func TestEstimateTokens(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, estimateTokens(tc.in))
+			assert.Equal(t, tc.want, EstimateTokens(tc.in))
 		})
 	}
 }
 
-func TestDefaultSettings_HasExpectedDefaults(t *testing.T) {
-	s := defaultSettings()
+func TestDefault_HasExpectedDefaults(t *testing.T) {
+	s := Default()
 	assert.Equal(t, "Dark", s.Theme)
 	assert.Equal(t, "http://127.0.0.1:1234/v1", s.APIEndpoint)
 	assert.Equal(t, 20, s.HistoryMessages)
@@ -50,14 +52,14 @@ func TestDefaultSettings_HasExpectedDefaults(t *testing.T) {
 // based on the configured auth header. Tests can inject 401s on the
 // Authorization path to force the Anthropic fallback.
 type modelsServer struct {
-	srv               *httptest.Server
-	bearerStatus      int
-	bearerBody        string
-	xAPIKeyStatus     int
-	xAPIKeyBody       string
-	bearerCalls       atomic.Int32
-	xAPIKeyCalls      atomic.Int32
-	lastAnthropicVer  atomic.Value // string
+	srv              *httptest.Server
+	bearerStatus     int
+	bearerBody       string
+	xAPIKeyStatus    int
+	xAPIKeyBody      string
+	bearerCalls      atomic.Int32
+	xAPIKeyCalls     atomic.Int32
+	lastAnthropicVer atomic.Value // string
 }
 
 func newModelsServer(t *testing.T) *modelsServer {
@@ -87,7 +89,7 @@ func TestFetchModels_OpenAIPath(t *testing.T) {
 	m := newModelsServer(t)
 	m.bearerBody = `{"data":[{"id":"gpt-4o"},{"id":"gpt-4o-mini","task":"chat"},{"id":""}]}`
 
-	ids, err := fetchModels(m.URL(), "sk-123")
+	ids, err := FetchModels(m.URL(), "sk-123")
 	require.NoError(t, err)
 	assert.Equal(t, []string{"gpt-4o", "gpt-4o-mini"}, ids, "empty IDs are dropped")
 	assert.EqualValues(t, 1, m.bearerCalls.Load())
@@ -100,7 +102,7 @@ func TestFetchModels_AnthropicFallback(t *testing.T) {
 	m.bearerBody = "unauthorized"
 	m.xAPIKeyBody = `{"data":[{"id":"claude-opus-4-7"}]}`
 
-	ids, err := fetchModels(m.URL(), "sk-ant-xxx")
+	ids, err := FetchModels(m.URL(), "sk-ant-xxx")
 	require.NoError(t, err)
 	assert.Equal(t, []string{"claude-opus-4-7"}, ids)
 	assert.EqualValues(t, 1, m.bearerCalls.Load())
@@ -113,7 +115,7 @@ func TestFetchModels_NoFallbackWhenKeyEmpty(t *testing.T) {
 	m.bearerStatus = 401
 	m.bearerBody = "needs auth"
 
-	_, err := fetchModels(m.URL(), "")
+	_, err := FetchModels(m.URL(), "")
 	require.Error(t, err)
 	assert.EqualValues(t, 1, m.bearerCalls.Load())
 	assert.EqualValues(t, 0, m.xAPIKeyCalls.Load(), "no key → no Anthropic retry")
@@ -124,14 +126,14 @@ func TestFetchModels_NoFallbackOnNon4xx(t *testing.T) {
 	m.bearerStatus = 500
 	m.bearerBody = "boom"
 
-	_, err := fetchModels(m.URL(), "sk")
+	_, err := FetchModels(m.URL(), "sk")
 	require.Error(t, err)
 	assert.EqualValues(t, 1, m.bearerCalls.Load())
 	assert.EqualValues(t, 0, m.xAPIKeyCalls.Load(), "5xx isn't an auth failure — don't retry")
 }
 
 func TestFetchModels_NoEndpointError(t *testing.T) {
-	_, err := fetchModels("", "sk")
+	_, err := FetchModels("", "sk")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no endpoint configured")
 }
@@ -166,7 +168,7 @@ func TestFetchModelsByTask(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			m := newModelsServer(t)
 			m.bearerBody = tc.response
-			got, err := fetchModelsByTask(m.URL(), "sk", tc.task)
+			got, err := FetchModelsByTask(m.URL(), "sk", tc.task)
 			require.NoError(t, err)
 			assert.Equal(t, tc.want, got)
 		})
@@ -217,7 +219,7 @@ func TestTestLLMConnection(t *testing.T) {
 			if endpoint == "" && tc.wantSub != "✗ No endpoint configured." {
 				endpoint = m.URL()
 			}
-			got := testLLMConnection(endpoint, "sk")
+			got := TestLLMConnection(endpoint, "sk")
 			assert.Contains(t, got, tc.wantSub)
 		})
 	}
@@ -236,17 +238,17 @@ func TestFetchModelContextLength_LMStudio(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	// Endpoint ending in /v1 — fetchModelContextLength strips it before
+	// Endpoint ending in /v1 — FetchModelContextLength strips it before
 	// probing native paths, so the test exercises that stripping too.
-	got := fetchModelContextLength(srv.URL+"/v1", "", "target-model")
+	got := FetchModelContextLength(srv.URL+"/v1", "", "target-model")
 	assert.Equal(t, 8192, got, "loaded_context_length wins when present")
 
 	// Unloaded model falls back to max_context_length.
-	got = fetchModelContextLength(srv.URL+"/v1", "", "other-model")
+	got = FetchModelContextLength(srv.URL+"/v1", "", "other-model")
 	assert.Equal(t, 16384, got)
 
 	// Unknown model returns 0 — no entry, no number.
-	got = fetchModelContextLength(srv.URL+"/v1", "", "ghost-model")
+	got = FetchModelContextLength(srv.URL+"/v1", "", "ghost-model")
 	assert.Equal(t, 0, got)
 }
 
@@ -261,7 +263,7 @@ func TestFetchModelContextLength_LlamaCpp(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	got := fetchModelContextLength(srv.URL, "", "any-model")
+	got := FetchModelContextLength(srv.URL, "", "any-model")
 	assert.Equal(t, 4096, got)
 }
 
@@ -288,7 +290,7 @@ func TestFetchModelContextLength_Ollama(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	got := fetchModelContextLength(srv.URL, "", "llama3")
+	got := FetchModelContextLength(srv.URL, "", "llama3")
 	assert.Equal(t, 131072, got)
 }
 
@@ -300,13 +302,13 @@ func TestFetchModelContextLength_UnknownServer(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	assert.Equal(t, 0, fetchModelContextLength(srv.URL+"/v1", "sk", "gpt-4o"))
+	assert.Equal(t, 0, FetchModelContextLength(srv.URL+"/v1", "sk", "gpt-4o"))
 }
 
 func TestFetchModelContextLength_BlankInputs(t *testing.T) {
 	// No endpoint or no model → don't even attempt a probe.
-	assert.Equal(t, 0, fetchModelContextLength("", "", "model"))
-	assert.Equal(t, 0, fetchModelContextLength("http://x", "", "  "))
+	assert.Equal(t, 0, FetchModelContextLength("", "", "model"))
+	assert.Equal(t, 0, FetchModelContextLength("http://x", "", "  "))
 }
 
 func TestAppSettings_SaveLoad_RoundTrip(t *testing.T) {
@@ -333,9 +335,9 @@ func TestAppSettings_SaveLoad_RoundTrip(t *testing.T) {
 		EnableImageGen:  true,
 		ComfyUIEndpoint: "http://comfy.test:8188",
 	}
-	require.NoError(t, original.save())
+	require.NoError(t, original.Save())
 
-	loaded := loadSettings()
+	loaded := Load()
 	assert.Equal(t, original.Theme, loaded.Theme)
 	assert.Equal(t, original.APIEndpoint, loaded.APIEndpoint)
 	assert.Equal(t, original.APIKey, loaded.APIKey)
@@ -349,31 +351,31 @@ func TestAppSettings_SaveLoad_RoundTrip(t *testing.T) {
 	assert.Equal(t, original.ComfyUIEndpoint, loaded.ComfyUIEndpoint)
 }
 
-func TestLoadSettings_MissingFileReturnsDefaults(t *testing.T) {
+func TestLoad_MissingFileReturnsDefaults(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
 	t.Setenv("HOME", dir)
 	t.Setenv("APPDATA", dir)
 
-	got := loadSettings()
-	assert.Equal(t, defaultSettings(), got)
+	got := Load()
+	assert.Equal(t, Default(), got)
 }
 
-func TestLoadSettings_CorruptFileReturnsDefaults(t *testing.T) {
+func TestLoad_CorruptFileReturnsDefaults(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
 	t.Setenv("HOME", dir)
 	t.Setenv("APPDATA", dir)
 
-	path, err := settingsPath()
+	path, err := Path()
 	require.NoError(t, err)
-	require.NoError(t, atomicWriteFile(path, []byte("{this is not json"), 0o600))
+	require.NoError(t, util.AtomicWriteFile(path, []byte("{this is not json"), 0o600))
 
-	got := loadSettings()
+	got := Load()
 	// Defaults restored on parse failure — we don't want to wipe their
-	// file (atomicWriteFile would do that on a subsequent save) but
-	// loading is best-effort. Verify the in-memory struct is sane.
-	assert.Equal(t, defaultSettings().APIEndpoint, got.APIEndpoint)
+	// file (Save would do that on a subsequent save) but loading is
+	// best-effort. Verify the in-memory struct is sane.
+	assert.Equal(t, Default().APIEndpoint, got.APIEndpoint)
 }
 
 // Sanity: a saved settings file is valid JSON and parses against the
@@ -385,9 +387,9 @@ func TestAppSettings_Save_ProducesValidJSON(t *testing.T) {
 	t.Setenv("HOME", dir)
 	t.Setenv("APPDATA", dir)
 
-	s := defaultSettings()
-	require.NoError(t, s.save())
-	path, err := settingsPath()
+	s := Default()
+	require.NoError(t, s.Save())
+	path, err := Path()
 	require.NoError(t, err)
 
 	raw, err := os.ReadFile(path)

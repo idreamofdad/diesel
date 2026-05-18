@@ -1,4 +1,4 @@
-package main
+package tracing
 
 import (
 	"context"
@@ -31,13 +31,12 @@ import (
 const tracerName = "diesel"
 
 // tracer is the package-wide handle used by every instrumented call site.
-// It's a thin pointer fetched at startup once initTracing has installed
-// the global TracerProvider; before initTracing runs (or when tracing is
-// disabled) it resolves to a no-op tracer, so spans started against it are
-// free.
+// It's a thin pointer fetched at startup once Init has installed the
+// global TracerProvider; before Init runs (or when tracing is disabled)
+// it resolves to a no-op tracer, so spans started against it are free.
 var tracer = otel.Tracer(tracerName)
 
-// initTracing wires up an OTLP trace exporter when OTEL_EXPORTER_OTLP_ENDPOINT
+// Init wires up an OTLP trace exporter when OTEL_EXPORTER_OTLP_ENDPOINT
 // (or the trace-specific override) is set, and otherwise installs nothing so
 // the global TracerProvider stays a no-op. The returned shutdown should be
 // deferred from main — it flushes any in-flight spans and closes the
@@ -47,7 +46,7 @@ var tracer = otel.Tracer(tracerName)
 // Transport selection follows the spec: OTEL_EXPORTER_OTLP_PROTOCOL chooses
 // between "http/protobuf" (default) and "grpc". OTEL_EXPORTER_OTLP_HEADERS
 // is honored automatically by both exporters.
-func initTracing(ctx context.Context) (func(context.Context) error, error) {
+func Init(ctx context.Context) (func(context.Context) error, error) {
 	endpoint := firstNonEmptyEnv(
 		"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
 		"OTEL_EXPORTER_OTLP_ENDPOINT",
@@ -131,23 +130,23 @@ func firstNonEmptyEnv(names ...string) string {
 	return ""
 }
 
-// tracedHTTPClient returns an http.Client whose transport emits an
-// HTTP-client span per request via otelhttp, with the given timeout. When
-// tracing is disabled the otelhttp transport falls back to the underlying
+// HTTPClient returns an http.Client whose transport emits an HTTP-client
+// span per request via otelhttp, with the given timeout. When tracing is
+// disabled the otelhttp transport falls back to the underlying
 // http.DefaultTransport behavior with effectively no overhead, so every
 // HTTP caller in the app can use this unconditionally.
-func tracedHTTPClient(timeout time.Duration) *http.Client {
+func HTTPClient(timeout time.Duration) *http.Client {
 	return &http.Client{
 		Timeout:   timeout,
 		Transport: otelhttp.NewTransport(http.DefaultTransport),
 	}
 }
 
-// startSpan is a tiny convenience over tracer.Start that keeps call sites
+// StartSpan is a tiny convenience over tracer.Start that keeps call sites
 // from having to import the trace package just to declare a span. Use it
 // for the operation-level spans (chat.completion, stt.transcribe, ...);
 // pass attribute.KeyValue args inline so the span starts with its initial
 // attributes already attached.
-func startSpan(ctx context.Context, name string, attrs ...attribute.KeyValue) (context.Context, trace.Span) {
+func StartSpan(ctx context.Context, name string, attrs ...attribute.KeyValue) (context.Context, trace.Span) {
 	return tracer.Start(ctx, name, trace.WithAttributes(attrs...))
 }

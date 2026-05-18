@@ -1,32 +1,36 @@
-package main
+package conversation
 
 import (
 	"context"
 	"encoding/json"
 	"os"
 
+	"diesel/internal/chat"
+	"diesel/internal/tracing"
+	"diesel/internal/util"
+
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 )
 
 // conversationFile is the on-disk shape of the persisted chat log. It's a
-// struct rather than a bare []chatMessage so the format can grow extra
+// struct rather than a bare []chat.Message so the format can grow extra
 // fields later (timestamps, a title, …) without breaking older files.
 type conversationFile struct {
-	Messages []chatMessage `json:"messages"`
+	Messages []chat.Message `json:"messages"`
 }
 
 // conversationPath returns the canonical location of the persisted
 // conversation, a sibling of settings.json.
 func conversationPath() (string, error) {
-	return configFilePath("conversation.json")
+	return util.ConfigFilePath("conversation.json")
 }
 
-// loadConversation reads the persisted chat log. A missing or unparseable
-// file just yields an empty history — a fresh start is always a valid
-// outcome, so this never returns an error.
-func loadConversation() []chatMessage {
-	_, span := startSpan(context.Background(), "conversation.load")
+// Load reads the persisted chat log. A missing or unparseable file just
+// yields an empty history — a fresh start is always a valid outcome, so
+// this never returns an error.
+func Load() []chat.Message {
+	_, span := tracing.StartSpan(context.Background(), "conversation.load")
 	defer span.End()
 
 	path, err := conversationPath()
@@ -51,13 +55,13 @@ func loadConversation() []chatMessage {
 	return cf.Messages
 }
 
-// saveConversation writes `history` to disk atomically. An empty history
-// removes the file entirely so the next launch starts clean rather than
-// replaying a blank transcript. `ctx` carries the parent span so the disk
-// write nests under the chat.turn it was triggered by; callers outside a
-// turn (e.g. the New Conversation menu) pass context.Background().
-func saveConversation(ctx context.Context, history []chatMessage) error {
-	_, span := startSpan(ctx, "conversation.save",
+// Save writes `history` to disk atomically. An empty history removes the
+// file entirely so the next launch starts clean rather than replaying a
+// blank transcript. `ctx` carries the parent span so the disk write nests
+// under the chat.turn it was triggered by; callers outside a turn (e.g.
+// the New Conversation menu) pass context.Background().
+func Save(ctx context.Context, history []chat.Message) error {
+	_, span := tracing.StartSpan(ctx, "conversation.save",
 		attribute.Int("conversation.messages", len(history)),
 	)
 	defer span.End()
@@ -87,7 +91,7 @@ func saveConversation(ctx context.Context, history []chatMessage) error {
 		return err
 	}
 	span.SetAttributes(attribute.Int("conversation.bytes", len(data)))
-	if err := atomicWriteFile(path, data, 0o600); err != nil {
+	if err := util.AtomicWriteFile(path, data, 0o600); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		return err

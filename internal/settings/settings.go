@@ -1,4 +1,4 @@
-package main
+package settings
 
 import (
 	"encoding/json"
@@ -7,6 +7,9 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"diesel/internal/tracing"
+	"diesel/internal/util"
 )
 
 const systemPrompt = `You are Diesel — a guy who's warm at heart but expresses affection through dry, playful teasing. Think of the friend who rolls his eyes at your bad ideas while also helping you execute them.
@@ -55,6 +58,12 @@ const imageClothing = `wearing a blue t-shirt and blue jeans`
 // failure modes. Also user-editable in Settings.
 const imageNegativePrompt = `woman, girl, shirt logo, feminine, wide hips`
 
+// nudityPrompt is the default fragment spliced into the image prompt when
+// the structured reply's Naked flag is true. The active value lives in
+// AppSettings.ImageNudity so the user can retune it from Settings; this
+// constant is just the seed for a fresh install.
+const nudityPrompt = "completely nude, naked, no clothing"
+
 // AppSettings is what we persist to disk.
 //
 // The API key sits in plaintext JSON here for simplicity. For real use, move
@@ -65,7 +74,7 @@ const imageNegativePrompt = `woman, girl, shirt logo, feminine, wide hips`
 // combined) to replay to the model with each new prompt; 0 means "no
 // history, just the latest message". The model's context length isn't
 // stored here — it's a property of the loaded model on the server side,
-// surfaced read-only in the dialog via fetchModelContextLength.
+// surfaced read-only in the dialog via FetchModelContextLength.
 type AppSettings struct {
 	Theme           string `json:"theme"`
 	APIEndpoint     string `json:"api_endpoint"`
@@ -113,13 +122,13 @@ type AppSettings struct {
 	ImageNegativePrompt string `json:"image_negative_prompt"`
 }
 
-// defaultSettings returns the starting values used when no settings file
-// exists yet (or fails to parse). Endpoint defaults to LM Studio's local
-// server so a fresh install works against a local model without config;
+// Default returns the starting values used when no settings file exists
+// yet (or fails to parse). Endpoint defaults to LM Studio's local server
+// so a fresh install works against a local model without config;
 // EnableTTS defaults on so replies speak themselves the moment the user
 // points TTSEndpoint at a Speaches/OpenAI-compatible server (or has one
 // at the same LLM endpoint via the fall-through).
-func defaultSettings() AppSettings {
+func Default() AppSettings {
 	return AppSettings{
 		Theme:           "Dark",
 		APIEndpoint:     "http://127.0.0.1:1234/v1",
@@ -140,21 +149,21 @@ func defaultSettings() AppSettings {
 	}
 }
 
-// settingsPath returns the canonical settings location:
+// Path returns the canonical settings location:
 //
 //	macOS:   ~/Library/Application Support/diesel/settings.json
 //	Linux:   $XDG_CONFIG_HOME/diesel/settings.json (or ~/.config/diesel/...)
 //	Windows: %AppData%/diesel/settings.json
-func settingsPath() (string, error) {
-	return configFilePath("settings.json")
+func Path() (string, error) {
+	return util.ConfigFilePath("settings.json")
 }
 
-// loadSettings reads the on-disk settings and falls back to defaults for
-// anything missing or unreadable. Never returns an error — callers always
-// get a usable struct.
-func loadSettings() AppSettings {
-	s := defaultSettings()
-	path, err := settingsPath()
+// Load reads the on-disk settings and falls back to defaults for anything
+// missing or unreadable. Never returns an error — callers always get a
+// usable struct.
+func Load() AppSettings {
+	s := Default()
+	path, err := Path()
 	if err != nil {
 		return s
 	}
@@ -166,10 +175,10 @@ func loadSettings() AppSettings {
 	return s
 }
 
-// save writes the settings to disk atomically. The file mode is 0600
+// Save writes the settings to disk atomically. The file mode is 0600
 // because the API key lives in plaintext.
-func (s AppSettings) save() error {
-	path, err := settingsPath()
+func (s AppSettings) Save() error {
+	path, err := Path()
 	if err != nil {
 		return err
 	}
@@ -177,7 +186,7 @@ func (s AppSettings) save() error {
 	if err != nil {
 		return err
 	}
-	return atomicWriteFile(path, data, 0o600)
+	return util.AtomicWriteFile(path, data, 0o600)
 }
 
 // modelEntry is one row from an OpenAI-compatible /models response.
@@ -208,7 +217,7 @@ func modelsRequest(endpoint, authHeader, apiKey, anthropicVersion string) ([]mod
 	if anthropicVersion != "" {
 		req.Header.Set("anthropic-version", anthropicVersion)
 	}
-	client := tracedHTTPClient(6 * time.Second)
+	client := tracing.HTTPClient(6 * time.Second)
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, 0, err
@@ -236,7 +245,7 @@ func modelsRequest(endpoint, authHeader, apiKey, anthropicVersion string) ([]mod
 // optional — local servers don't need it. Tries OpenAI-style auth first,
 // then falls back to Anthropic's x-api-key only when a key is configured.
 func fetchModelEntries(endpoint, apiKey string) ([]modelEntry, error) {
-	endpoint = normalizeEndpoint(endpoint)
+	endpoint = util.NormalizeEndpoint(endpoint)
 	if endpoint == "" {
 		return nil, fmt.Errorf("no endpoint configured")
 	}
@@ -252,9 +261,9 @@ func fetchModelEntries(endpoint, apiKey string) ([]modelEntry, error) {
 	return nil, err
 }
 
-// fetchModels returns just the IDs from fetchModelEntries — what the LLM
+// FetchModels returns just the IDs from fetchModelEntries — what the LLM
 // model dropdown needs.
-func fetchModels(endpoint, apiKey string) ([]string, error) {
+func FetchModels(endpoint, apiKey string) ([]string, error) {
 	entries, err := fetchModelEntries(endpoint, apiKey)
 	if err != nil {
 		return nil, err
@@ -266,12 +275,12 @@ func fetchModels(endpoint, apiKey string) ([]string, error) {
 	return ids, nil
 }
 
-// fetchModelsByTask returns the IDs whose `task` field matches `task`.
+// FetchModelsByTask returns the IDs whose `task` field matches `task`.
 // Speaches tags every entry in /models with a task (e.g.
 // "automatic-speech-recognition", "text-to-speech"); servers that don't
 // (vanilla faster-whisper-server, OpenAI, plain LM Studio) fall through to
 // every model — harmless because their lists are already task-specific.
-func fetchModelsByTask(endpoint, apiKey, task string) ([]string, error) {
+func FetchModelsByTask(endpoint, apiKey, task string) ([]string, error) {
 	entries, err := fetchModelEntries(endpoint, apiKey)
 	if err != nil {
 		return nil, err
@@ -289,19 +298,19 @@ func fetchModelsByTask(endpoint, apiKey, task string) ([]string, error) {
 	return all, nil
 }
 
-// fetchSTTModels returns models tagged as automatic-speech-recognition,
+// FetchSTTModels returns models tagged as automatic-speech-recognition,
 // falling back to every model when the server doesn't tag entries.
-func fetchSTTModels(endpoint, apiKey string) ([]string, error) {
-	return fetchModelsByTask(endpoint, apiKey, "automatic-speech-recognition")
+func FetchSTTModels(endpoint, apiKey string) ([]string, error) {
+	return FetchModelsByTask(endpoint, apiKey, "automatic-speech-recognition")
 }
 
-// fetchTTSModels returns models tagged as text-to-speech, falling back to
+// FetchTTSModels returns models tagged as text-to-speech, falling back to
 // every model when the server doesn't tag entries.
-func fetchTTSModels(endpoint, apiKey string) ([]string, error) {
-	return fetchModelsByTask(endpoint, apiKey, "text-to-speech")
+func FetchTTSModels(endpoint, apiKey string) ([]string, error) {
+	return FetchModelsByTask(endpoint, apiKey, "text-to-speech")
 }
 
-// fetchModelContextLength reports how big the loaded context window is for
+// FetchModelContextLength reports how big the loaded context window is for
 // `modelID` on the configured server. The OpenAI-compat spec doesn't carry
 // this — context length is a server-side property of the loaded weights —
 // so we probe each major backend's native endpoint in turn:
@@ -314,9 +323,9 @@ func fetchTTSModels(endpoint, apiKey string) ([]string, error) {
 // shim, and any unrecognized server land here). The caller renders that
 // as "not reported" so the UI is honest about what we can and can't see.
 // All probes share a short timeout — this runs synchronously off the UI
-// thread (via pollAsync) and shouldn't keep the dialog waiting.
-func fetchModelContextLength(endpoint, apiKey, modelID string) int {
-	endpoint = normalizeEndpoint(endpoint)
+// thread (via util.PollAsync) and shouldn't keep the dialog waiting.
+func FetchModelContextLength(endpoint, apiKey, modelID string) int {
+	endpoint = util.NormalizeEndpoint(endpoint)
 	if endpoint == "" || strings.TrimSpace(modelID) == "" {
 		return 0
 	}
@@ -344,7 +353,7 @@ func nativeProbeGET(url, apiKey string, out any) bool {
 	if apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
-	client := tracedHTTPClient(3 * time.Second)
+	client := tracing.HTTPClient(3 * time.Second)
 	resp, err := client.Do(req)
 	if err != nil {
 		return false
@@ -410,7 +419,7 @@ func ollamaContextLength(base, apiKey, modelID string) int {
 	if apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
-	client := tracedHTTPClient(3 * time.Second)
+	client := tracing.HTTPClient(3 * time.Second)
 	resp, err := client.Do(req)
 	if err != nil {
 		return 0
@@ -440,7 +449,7 @@ func ollamaContextLength(base, apiKey, modelID string) int {
 	return 0
 }
 
-// estimateTokens approximates the token count of `text` using the chars/4
+// EstimateTokens approximates the token count of `text` using the chars/4
 // rule of thumb OpenAI publishes for English. We intentionally don't ask
 // the server for an exact count: most OpenAI-compat servers we target
 // (LM Studio, vanilla OpenAI, Ollama) don't expose a tokenize endpoint,
@@ -449,7 +458,7 @@ func ollamaContextLength(base, apiKey, modelID string) int {
 // and "0 tokens" mid-edit. The chars/4 heuristic is stable, instant, and
 // good enough as a sanity check on prompt size. Callers should prefix the
 // rendered count with "~" so users know it isn't exact.
-func estimateTokens(text string) int {
+func EstimateTokens(text string) int {
 	n := len([]rune(strings.TrimSpace(text)))
 	if n == 0 {
 		return 0
@@ -458,16 +467,16 @@ func estimateTokens(text string) int {
 	return (n + 3) / 4
 }
 
-// testLLMConnection probes the configured endpoint by fetching its model
+// TestLLMConnection probes the configured endpoint by fetching its model
 // list and returns a short user-facing status string. The API key is
 // optional: local servers (LM Studio, Ollama, …) usually accept anonymous
 // requests, so an empty key just omits the auth header rather than
 // short-circuiting the test.
-func testLLMConnection(endpoint, apiKey string) string {
-	if normalizeEndpoint(endpoint) == "" {
+func TestLLMConnection(endpoint, apiKey string) string {
+	if util.NormalizeEndpoint(endpoint) == "" {
 		return "✗ No endpoint configured."
 	}
-	ids, err := fetchModels(endpoint, apiKey)
+	ids, err := FetchModels(endpoint, apiKey)
 	if err != nil {
 		return "✗ " + err.Error()
 	}

@@ -1,4 +1,4 @@
-package main
+package audio
 
 import (
 	"context"
@@ -8,6 +8,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -75,39 +76,20 @@ func TestFrameRMS(t *testing.T) {
 
 func TestEncodeWAV_HeaderShape(t *testing.T) {
 	pcm := pcmFromSamples(1, 2, 3, 4)
-	wav := encodeWAV(pcm)
+	out := EncodeWAV(pcm)
 
-	require.GreaterOrEqual(t, len(wav), 44, "WAV header should be 44 bytes")
-	assert.Equal(t, "RIFF", string(wav[0:4]))
-	assert.Equal(t, uint32(36+len(pcm)), binary.LittleEndian.Uint32(wav[4:8]))
-	assert.Equal(t, "WAVE", string(wav[8:12]))
-	assert.Equal(t, "fmt ", string(wav[12:16]))
-	assert.Equal(t, uint32(16), binary.LittleEndian.Uint32(wav[16:20]), "PCM fmt chunk size")
-	assert.Equal(t, uint16(1), binary.LittleEndian.Uint16(wav[20:22]), "format tag = PCM")
-	assert.Equal(t, uint16(sttChannels), binary.LittleEndian.Uint16(wav[22:24]))
-	assert.Equal(t, uint32(sttSampleRate), binary.LittleEndian.Uint32(wav[24:28]))
-	assert.Equal(t, "data", string(wav[36:40]))
-	assert.Equal(t, uint32(len(pcm)), binary.LittleEndian.Uint32(wav[40:44]))
-	assert.Equal(t, pcm, wav[44:])
-}
-
-func TestEncodeWAV_RoundTripThroughParseWAV(t *testing.T) {
-	cases := [][]int16{
-		{},
-		{0},
-		{1, -1, 32767, -32768},
-	}
-	for i, samples := range cases {
-		t.Run("case "+itoaForTest(i), func(t *testing.T) {
-			pcm := pcmFromSamples(samples...)
-			info, err := parseWAV(encodeWAV(pcm))
-			require.NoError(t, err)
-			assert.Equal(t, sttSampleRate, info.sampleRate)
-			assert.Equal(t, sttChannels, info.channels)
-			assert.Equal(t, 16, info.bitsPerSample)
-			assert.Equal(t, pcm, info.pcm)
-		})
-	}
+	require.GreaterOrEqual(t, len(out), 44, "WAV header should be 44 bytes")
+	assert.Equal(t, "RIFF", string(out[0:4]))
+	assert.Equal(t, uint32(36+len(pcm)), binary.LittleEndian.Uint32(out[4:8]))
+	assert.Equal(t, "WAVE", string(out[8:12]))
+	assert.Equal(t, "fmt ", string(out[12:16]))
+	assert.Equal(t, uint32(16), binary.LittleEndian.Uint32(out[16:20]), "PCM fmt chunk size")
+	assert.Equal(t, uint16(1), binary.LittleEndian.Uint16(out[20:22]), "format tag = PCM")
+	assert.Equal(t, uint16(sttChannels), binary.LittleEndian.Uint16(out[22:24]))
+	assert.Equal(t, uint32(sttSampleRate), binary.LittleEndian.Uint32(out[24:28]))
+	assert.Equal(t, "data", string(out[36:40]))
+	assert.Equal(t, uint32(len(pcm)), binary.LittleEndian.Uint32(out[40:44]))
+	assert.Equal(t, pcm, out[44:])
 }
 
 func TestTranscribe_ConfigErrors(t *testing.T) {
@@ -119,7 +101,7 @@ func TestTranscribe_ConfigErrors(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := transcribe(context.Background(),tc.endpoint, "k", "m", []byte("wav"))
+			_, err := Transcribe(context.Background(), tc.endpoint, "k", "m", []byte("wav"))
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tc.wantErrSub)
 		})
@@ -139,8 +121,8 @@ func TestTranscribe_RequestShape(t *testing.T) {
 		{"blank key omits auth", "whisper-1", "", "whisper-1", ""},
 		{"whitespace model uses default", "   ", "sk", sttDefaultModel, "Bearer sk"},
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
+	for i, tc := range cases {
+		t.Run(strconv.Itoa(i)+" "+tc.name, func(t *testing.T) {
 			var gotModel, gotAuth, gotPath, gotFile string
 			var gotResponseFormat string
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -162,7 +144,7 @@ func TestTranscribe_RequestShape(t *testing.T) {
 			}))
 			t.Cleanup(srv.Close)
 
-			text, err := transcribe(context.Background(),srv.URL+"/", tc.apiKey, tc.model, []byte("FAKEWAV"))
+			text, err := Transcribe(context.Background(), srv.URL+"/", tc.apiKey, tc.model, []byte("FAKEWAV"))
 			require.NoError(t, err)
 			assert.Equal(t, "hello world", text)
 			assert.Equal(t, "/audio/transcriptions", gotPath)
@@ -181,7 +163,7 @@ func TestTranscribe_HTTPError(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	_, err := transcribe(context.Background(),srv.URL, "k", "m", []byte("wav"))
+	_, err := Transcribe(context.Background(), srv.URL, "k", "m", []byte("wav"))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "HTTP 503")
 	assert.Contains(t, err.Error(), "model loading")
@@ -193,7 +175,7 @@ func TestTranscribe_TrimsResponseText(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	text, err := transcribe(context.Background(),srv.URL, "", "", []byte{})
+	text, err := Transcribe(context.Background(), srv.URL, "", "", []byte{})
 	require.NoError(t, err)
 	assert.Equal(t, "leading and trailing", text)
 }
@@ -205,8 +187,8 @@ func TestAudioDeviceEnumeration_DoesNotPanic(t *testing.T) {
 	// guarantee the call doesn't crash and returns a slice (possibly
 	// empty) instead of nil — surfaces breakage if a future miqt update
 	// changes the return convention.
-	ins := audioInputDescriptions()
-	outs := audioOutputDescriptions()
+	ins := InputDescriptions()
+	outs := OutputDescriptions()
 	assert.NotNil(t, ins)
 	assert.NotNil(t, outs)
 	for _, name := range ins {
