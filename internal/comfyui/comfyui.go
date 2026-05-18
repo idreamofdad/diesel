@@ -144,6 +144,40 @@ func setNudity(graph map[string]workflowNode, naked bool) string {
 	return ""
 }
 
+// setSteps overrides the sampler step count by writing to the
+// PrimitiveInt node titled "Steps" in `graph`. The bundled workflow
+// wires that node into both the sampler's `steps` and `end_at_step`
+// inputs so a single value drives both, the same way the nudity toggle
+// drives the ComfySwitchNode. Workflows without a "Steps" node — or
+// callers passing a non-positive value — silently no-op; the workflow's
+// hard-coded step count then wins. Returns the matched node ID (empty
+// when no override happened) for tracing.
+func setSteps(graph map[string]workflowNode, steps int) string {
+	if steps <= 0 {
+		return ""
+	}
+	ids := make([]string, 0, len(graph))
+	for id := range graph {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		n := graph[id]
+		if n.ClassType != "PrimitiveInt" {
+			continue
+		}
+		title, _ := n.Meta["title"].(string)
+		if title != "Steps" {
+			continue
+		}
+		if _, ok := n.Inputs["value"]; ok {
+			n.Inputs["value"] = steps
+			return id
+		}
+	}
+	return ""
+}
+
 // setConnectedText follows sampler.<key> — a ComfyUI input connection of
 // the form ["<node-id>", <slot>] — to its source node and rewrites that
 // node's `text` field. Used to redirect the sampler's positive/negative
@@ -250,6 +284,13 @@ func Generate(ctx context.Context, s settings.AppSettings, positive, negative st
 	if nudityID != "" {
 		rewriteSpan.SetAttributes(attribute.String("workflow.nudity_id", nudityID))
 	}
+	stepsID := setSteps(graph, s.ImageSteps)
+	if stepsID != "" {
+		rewriteSpan.SetAttributes(
+			attribute.String("workflow.steps_id", stepsID),
+			attribute.Int("workflow.steps_value", s.ImageSteps),
+		)
+	}
 	rewriteSpan.End()
 	_ = rewriteCtx
 	span.SetAttributes(
@@ -258,6 +299,9 @@ func Generate(ctx context.Context, s settings.AppSettings, positive, negative st
 	)
 	if nudityID != "" {
 		span.SetAttributes(attribute.String("workflow.nudity_id", nudityID))
+	}
+	if stepsID != "" {
+		span.SetAttributes(attribute.String("workflow.steps_id", stepsID))
 	}
 	// Stderr trace of what we're actually sending. Visible when Diesel is
 	// launched from a terminal, invisible in the packaged .app — useful

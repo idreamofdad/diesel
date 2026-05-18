@@ -49,12 +49,18 @@
     "inputs": {
       "add_noise": "enable",
       "noise_seed": 312122644965112,
-      "steps": 10,
+      "steps": [
+        "57",
+        0
+      ],
       "cfg": 4,
       "sampler_name": "euler_ancestral",
       "scheduler": "normal",
       "start_at_step": 0,
-      "end_at_step": 10,
+      "end_at_step": [
+        "57",
+        0
+      ],
       "return_with_leftover_noise": "enable",
       "model": [
         "54",
@@ -162,6 +168,15 @@
     "class_type": "PrimitiveBoolean",
     "_meta": {
       "title": "Nudity"
+    }
+  },
+  "57": {
+    "inputs": {
+      "value": 10
+    },
+    "class_type": "PrimitiveInt",
+    "_meta": {
+      "title": "Steps"
     }
   }
 }

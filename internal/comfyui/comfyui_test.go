@@ -328,6 +328,118 @@ func TestSetNudity(t *testing.T) {
 	}
 }
 
+func TestSetSteps(t *testing.T) {
+	cases := []struct {
+		name      string
+		graph     map[string]workflowNode
+		steps     int
+		wantID    string
+		wantValue any // nil means: assert the node was untouched
+	}{
+		{
+			name: "titled PrimitiveInt is overwritten",
+			graph: map[string]workflowNode{
+				"57": titled("PrimitiveInt", "Steps", map[string]any{"value": float64(10)}),
+			},
+			steps:     25,
+			wantID:    "57",
+			wantValue: 25,
+		},
+		{
+			name: "other PrimitiveInt nodes are ignored",
+			graph: map[string]workflowNode{
+				"40": titled("PrimitiveInt", "CFG", map[string]any{"value": float64(4)}),
+				"57": titled("PrimitiveInt", "Steps", map[string]any{"value": float64(10)}),
+			},
+			steps:     30,
+			wantID:    "57",
+			wantValue: 30,
+		},
+		{
+			name: "lowest-id Steps wins on duplicates",
+			graph: map[string]workflowNode{
+				"99": titled("PrimitiveInt", "Steps", map[string]any{"value": float64(10)}),
+				"10": titled("PrimitiveInt", "Steps", map[string]any{"value": float64(10)}),
+			},
+			steps:     12,
+			wantID:    "10",
+			wantValue: 12,
+		},
+		{
+			name: "no node in graph is a silent no-op",
+			graph: map[string]workflowNode{
+				"4": node("CheckpointLoaderSimple", map[string]any{"ckpt_name": "x"}),
+			},
+			steps:  20,
+			wantID: "",
+		},
+		{
+			name: "Steps title on a non-int node is ignored",
+			graph: map[string]workflowNode{
+				"57": titled("PrimitiveBoolean", "Steps", map[string]any{"value": false}),
+			},
+			steps:  20,
+			wantID: "",
+		},
+		{
+			name: "missing value input means no write",
+			graph: map[string]workflowNode{
+				"57": titled("PrimitiveInt", "Steps", map[string]any{}),
+			},
+			steps:  20,
+			wantID: "",
+		},
+		{
+			name: "zero steps is a silent no-op so the workflow default wins",
+			graph: map[string]workflowNode{
+				"57": titled("PrimitiveInt", "Steps", map[string]any{"value": float64(10)}),
+			},
+			steps:  0,
+			wantID: "",
+		},
+		{
+			name: "negative steps is a silent no-op",
+			graph: map[string]workflowNode{
+				"57": titled("PrimitiveInt", "Steps", map[string]any{"value": float64(10)}),
+			},
+			steps:  -3,
+			wantID: "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gotID := setSteps(tc.graph, tc.steps)
+			assert.Equal(t, tc.wantID, gotID)
+			if tc.wantID != "" && tc.wantValue != nil {
+				assert.Equal(t, tc.wantValue, tc.graph[tc.wantID].Inputs["value"])
+			}
+		})
+	}
+}
+
+func TestSetSteps_OnEmbeddedWorkflow(t *testing.T) {
+	// Round-trip against the actual graph shipped in the binary, so a
+	// re-export of default_workflow.json that drops the Steps title or
+	// the PrimitiveInt class fails here instead of silently leaving the
+	// step count stuck at whatever the JSON ships with.
+	parse := func(t *testing.T) map[string]workflowNode {
+		t.Helper()
+		var g map[string]workflowNode
+		require.NoError(t, json.Unmarshal([]byte(defaultWorkflow), &g))
+		return g
+	}
+
+	g := parse(t)
+	id := setSteps(g, 25)
+	require.NotEmpty(t, id, "embedded workflow should expose a Steps override")
+	assert.Equal(t, 25, g[id].Inputs["value"])
+
+	g = parse(t)
+	id2 := setSteps(g, 1)
+	assert.Equal(t, id, id2, "steps id is stable across calls")
+	assert.Equal(t, 1, g[id].Inputs["value"])
+}
+
 func TestSetNudity_OnEmbeddedWorkflow(t *testing.T) {
 	// Round-trip against the actual graph shipped in the binary, so a
 	// re-export of default_workflow.json that drops the Nudity title or
