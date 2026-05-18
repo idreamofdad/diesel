@@ -259,6 +259,17 @@ func (m *Manager) buildRouter(token string) *gin.Engine {
 				fileServer.ServeHTTP(c.Writer, c.Request)
 				return
 			}
+			// Asset-shaped paths (anything with a file extension) must
+			// 404 cleanly rather than fall through to index.html — the
+			// classic symptom is browsers parsing the SPA's HTML as
+			// WebAssembly/JS/CSS and producing "expected magic word"
+			// errors. SPA deep-link routes (no extension, e.g.
+			// "/settings") still get the index.html fallback so
+			// client-side routing keeps working.
+			if looksLikeAsset(path) {
+				c.AbortWithStatus(http.StatusNotFound)
+				return
+			}
 			c.Request.URL.Path = "/"
 			fileServer.ServeHTTP(c.Writer, c.Request)
 		})
@@ -285,6 +296,19 @@ func hasIndex(fsys fs.FS) bool {
 	}
 	_ = f.Close()
 	return true
+}
+
+// looksLikeAsset returns true when the path's final segment has a
+// file extension. Used by the NoRoute handler to distinguish missing
+// SPA deep-links (which should rewrite to index.html) from missing
+// asset files (which must 404 — otherwise the browser tries to parse
+// the SPA HTML as WASM/JS/CSS).
+func looksLikeAsset(path string) bool {
+	last := path
+	if i := strings.LastIndex(path, "/"); i >= 0 {
+		last = path[i+1:]
+	}
+	return strings.Contains(last, ".")
 }
 
 // stubHTML is what /  serves when no frontend has been built yet —

@@ -16,7 +16,6 @@
     "vite": "^6.0.7"
   },
   "dependencies": {
-    "@ricky0123/vad-web": "^0.0.24",
-    "onnxruntime-web": "^1.20.1"
+    "@ricky0123/vad-web": "^0.0.24"
   }
 }

@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"diesel/internal/hub"
@@ -96,6 +97,59 @@ func TestHandleSend_Busy(t *testing.T) {
 	req2.Header.Set("Content-Type", "application/json")
 	r.ServeHTTP(w2, req2)
 	assert.Equal(t, http.StatusConflict, w2.Code)
+}
+
+// TestLooksLikeAsset distinguishes asset-shaped paths from SPA deep
+// links. The classifier drives whether NoRoute 404s (asset path) or
+// rewrites to index.html (SPA route).
+func TestLooksLikeAsset(t *testing.T) {
+	cases := []struct {
+		path string
+		want bool
+	}{
+		{"ort-wasm.wasm", true},
+		{"assets/index-abc.js", true},
+		{"deep/nested/file.css", true},
+		{"silero_vad_v5.onnx", true},
+		{"settings", false},      // SPA route — no extension
+		{"app/conversation", false},
+		{"", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.path, func(t *testing.T) {
+			assert.Equal(t, tc.want, looksLikeAsset(tc.path))
+		})
+	}
+}
+
+// TestNoRoute_AssetMisses404 — a missing .wasm must 404 cleanly,
+// otherwise the SPA's index.html falls through and the browser
+// tries to parse HTML as WebAssembly. SPA deep-links (no
+// extension) still fall through to index.html so client-side
+// routing keeps working.
+func TestNoRoute_AssetMisses404(t *testing.T) {
+	// Provide a non-empty FS (with index.html) so the static branch
+	// activates; the requested .wasm intentionally isn't in it.
+	stub := fstest.MapFS{
+		"index.html": {Data: []byte("<!doctype html><html></html>")},
+	}
+	h := hub.New()
+	m := New(h, stub)
+	r := m.buildRouter("")
+
+	// Missing asset → 404, no HTML body.
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/ort-wasm.wasm", nil)
+	r.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusNotFound, w.Code, "missing wasm must 404")
+	assert.NotContains(t, w.Body.String(), "<!doctype", "must not fall through to index.html")
+
+	// Missing SPA deep link → fallback to index.html.
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/some-route", nil)
+	r.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), "<!doctype")
 }
 
 // TestHandleState_ReturnsHistory verifies the snapshot endpoint

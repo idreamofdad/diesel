@@ -1,6 +1,6 @@
 import { defineConfig } from 'vite';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
-import { copyFileSync, mkdirSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -11,27 +11,70 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 // build's assets/ directory and tell the library to look there — that
 // way the bundle is self-contained and works offline once the binary
 // is built (no CDN fetch on first load).
+//
+// Important: @ricky0123/vad-web pins its own (older) onnxruntime-web
+// under node_modules/@ricky0123/vad-web/node_modules/. The library
+// loads ort-wasm{,-simd,-threaded,-simd-threaded}.wasm at runtime
+// based on browser feature detection — copying from the top-level
+// onnxruntime-web (newer file naming scheme) leaves the library
+// asking for files that don't exist, falling through to index.html,
+// and crashing with "expected magic word 00 61 73 6d". We copy from
+// the nested install so the names match what the library asks for.
 const vadAssets = () => ({
   name: 'copy-vad-assets',
   buildStart() {
+    // Wipe public/ first so leftovers from a previous build (e.g.
+    // files from an old vite.config that referenced different ORT
+    // paths) don't end up in dist/. Vite empties dist/ but happily
+    // re-copies whatever's sitting in public/.
     const dest = resolve(__dirname, 'public');
+    rmSync(dest, { recursive: true, force: true });
     mkdirSync(dest, { recursive: true });
-    const files = [
-      'node_modules/@ricky0123/vad-web/dist/vad.worklet.bundle.min.js',
-      'node_modules/@ricky0123/vad-web/dist/silero_vad_legacy.onnx',
-      'node_modules/@ricky0123/vad-web/dist/silero_vad_v5.onnx',
-      'node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.wasm',
-      'node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.jsep.wasm',
-      'node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.mjs',
+    const vad = 'node_modules/@ricky0123/vad-web/dist';
+    // ORT WASM lives at one of two paths depending on whether npm
+    // hoisted vad-web's pinned onnxruntime-web up to the top-level
+    // or kept it nested. The hoisted path is the common case; we
+    // probe both and copy from whichever exists. All four
+    // permutations are needed because the library picks one at
+    // runtime based on SharedArrayBuffer + SIMD detection.
+    const ortCandidates = [
+      'node_modules/onnxruntime-web/dist',
+      'node_modules/@ricky0123/vad-web/node_modules/onnxruntime-web/dist',
     ];
-    for (const rel of files) {
-      const src = resolve(__dirname, rel);
+    const wasmNames = [
+      'ort-wasm.wasm',
+      'ort-wasm-simd.wasm',
+      'ort-wasm-threaded.wasm',
+      'ort-wasm-simd-threaded.wasm',
+    ];
+    const vadNames = [
+      'vad.worklet.bundle.min.js',
+      'silero_vad_legacy.onnx',
+      'silero_vad_v5.onnx',
+    ];
+    for (const name of vadNames) {
       try {
-        copyFileSync(src, resolve(dest, rel.split('/').pop()!));
+        copyFileSync(resolve(__dirname, vad, name), resolve(dest, name));
       } catch {
-        // Some files exist only in some ORT/VAD versions. Missing ones
-        // are silently skipped — the library will fall back to whatever
-        // it can find at runtime.
+        /* missing in this VAD version — skip */
+      }
+    }
+    for (const name of wasmNames) {
+      let copied = false;
+      for (const dir of ortCandidates) {
+        try {
+          copyFileSync(resolve(__dirname, dir, name), resolve(dest, name));
+          copied = true;
+          break;
+        } catch {
+          /* try the next candidate */
+        }
+      }
+      if (!copied) {
+        // Hard fail at build time — a missing WASM shows up as a
+        // confusing "magic word" error in the browser, but the
+        // root cause (the file was never copied) is obvious here.
+        throw new Error(`ORT WASM ${name} not found in any of ${ortCandidates.join(', ')}`);
       }
     }
   },
