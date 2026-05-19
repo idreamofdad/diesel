@@ -8,14 +8,19 @@
   // Qt transcript widget, which calls EnsureCursorVisible after every
   // Append. We compare the current scroll position to the bottom and
   // only scroll if the user is already near the end, so a user who
-  // scrolled up to re-read something isn't yanked back down.
+  // scrolled up to re-read something isn't yanked back down. The first
+  // render with messages always jumps to the bottom so a restored
+  // conversation opens on the latest reply instead of the oldest.
   let prevCount = 0;
+  let initialScrolled = false;
   $effect(() => {
     if (!container) return;
     if (messages.length === prevCount) return;
+    const firstPaint = !initialScrolled && messages.length > 0;
     prevCount = messages.length;
     const nearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 80;
-    if (nearBottom) {
+    if (firstPaint || nearBottom) {
+      initialScrolled = initialScrolled || firstPaint;
       requestAnimationFrame(() => {
         container.scrollTop = container.scrollHeight;
       });
