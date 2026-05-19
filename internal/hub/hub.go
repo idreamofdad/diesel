@@ -76,6 +76,15 @@ const (
 	// PortraitURL is non-empty, the PNG is ready at that URL. Broadcast
 	// to every subscriber.
 	EventPortraitReady EventType = "portrait_ready"
+	// EventPortraitProgress fires repeatedly while a portrait is
+	// rendering — once per ComfyUI sampler step. When PortraitURL is
+	// non-empty, an intermediate preview frame is fetchable there
+	// (JPEG, typically). Step/Total carry the sampler progress; either
+	// or both may be zero on frames that arrived ahead of the first
+	// step event. Best-effort: subscribers whose buffers are full may
+	// miss frames, which is fine — the next one (or the final
+	// EventPortraitReady) will catch them up.
+	EventPortraitProgress EventType = "portrait_progress"
 	// EventTurnError fires when something in the pipeline failed badly
 	// enough that no assistant message will arrive. Releases the lock.
 	EventTurnError EventType = "turn_error"
@@ -111,6 +120,11 @@ type Event struct {
 	// determines who should actually fetch+play it.
 	AudioURL string      `json:"audio_url,omitempty"`
 	Usage    *chat.Usage `json:"usage,omitempty"`
+	// Step and Total carry sampler progress on EventPortraitProgress.
+	// Either may be zero on frames that landed before the first
+	// "progress" message from ComfyUI.
+	Step  int `json:"step,omitempty"`
+	Total int `json:"total,omitempty"`
 	// Status carries a short status-bar message for EventStatus.
 	Status string `json:"status,omitempty"`
 	// Error is the human-readable failure message for EventTurnError.
@@ -136,6 +150,12 @@ type Subscriber struct {
 // clients fetch them within seconds of the broadcast.
 const mediaCacheSize = 8
 
+// previewCacheSize bounds the in-flight portrait preview frames. One
+// turn produces ~one frame per sampler step; sized to comfortably hold
+// a full render or two so a slow client can still fetch the most
+// recent frame after a backlog.
+const previewCacheSize = 64
+
 // Hub owns the conversation. Construct with New(), then call Start once
 // at boot to load any persisted history and Stop at shutdown.
 type Hub struct {
@@ -144,6 +164,7 @@ type Hub struct {
 	inFlight   bool
 	subs       map[string]*Subscriber
 	portraits  *blobCache
+	previews   *blobCache
 	audio      *blobCache
 	nextTurnID int64
 	// statusCh / lastStatus track the most recent status string so a
@@ -157,6 +178,7 @@ func New() *Hub {
 	return &Hub{
 		subs:       make(map[string]*Subscriber),
 		portraits:  newBlobCache(mediaCacheSize),
+		previews:   newBlobCache(previewCacheSize),
 		audio:      newBlobCache(mediaCacheSize),
 		lastStatus: "Ready",
 	}
@@ -269,6 +291,16 @@ func (h *Hub) LatestPortrait() (string, []byte) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.portraits.latest()
+}
+
+// PortraitPreview returns the bytes for a cached intermediate preview
+// frame (ComfyUI emits JPEG, sometimes PNG). Previews evict quickly —
+// callers should treat (nil, false) as "stale, try the latest one"
+// rather than an error.
+func (h *Hub) PortraitPreview(id string) ([]byte, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.previews.get(id)
 }
 
 // Audio returns the audio bytes for a previously-broadcast audio ID.
