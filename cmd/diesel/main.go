@@ -161,20 +161,25 @@ func main() {
 	portraitCol.AddStretch()
 
 	var latestPortraitPNG []byte
-	showPortrait := func(png []byte) {
-		if len(png) == 0 {
+	// final=false is used for intermediate ComfyUI preview frames so the
+	// double-click "view full size" handler keeps showing the last
+	// fully-rendered PNG instead of a half-baked JPEG preview.
+	showPortrait := func(data []byte, final bool) {
+		if len(data) == 0 {
 			return
 		}
 		pm := qt.NewQPixmap()
-		if !pm.LoadFromDataWithData(png) || pm.IsNull() {
+		if !pm.LoadFromDataWithData(data) || pm.IsNull() {
 			return
 		}
-		latestPortraitPNG = png
+		if final {
+			latestPortraitPNG = data
+		}
 		portrait.SetPixmap(pm.ScaledToWidth2(portraitWidth, qt.SmoothTransformation))
 	}
 	// Seed from the hub if it managed to load the cached portrait.
 	if _, png := h.LatestPortrait(); len(png) > 0 {
-		showPortrait(png)
+		showPortrait(png, true)
 	}
 
 	portrait.OnMouseDoubleClickEvent(func(super func(event *qt.QMouseEvent), event *qt.QMouseEvent) {
@@ -410,11 +415,22 @@ func main() {
 				}
 			}
 			armNext()
+		case hub.EventPortraitProgress:
+			// Intermediate preview frame from ComfyUI — paint it so the
+			// user sees the image developing. Missing previews are fine
+			// (cache evicted, slow event loop, etc.) — the next frame
+			// or the final EventPortraitReady will land soon enough.
+			if ev.PortraitURL != "" {
+				id := strings.TrimPrefix(ev.PortraitURL, "/api/portrait-preview/")
+				if data, ok := h.PortraitPreview(id); ok {
+					showPortrait(data, false)
+				}
+			}
 		case hub.EventPortraitReady:
 			if ev.PortraitURL != "" {
 				id := strings.TrimPrefix(ev.PortraitURL, "/api/portrait/")
 				if data, ok := h.Portrait(id); ok {
-					showPortrait(data)
+					showPortrait(data, true)
 				}
 			}
 		case hub.EventTurnError:
