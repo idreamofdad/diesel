@@ -18,6 +18,7 @@ export type EventType =
   | 'turn_complete'
   | 'audio_ready'
   | 'portrait_ready'
+  | 'portrait_progress'
   | 'turn_error'
   | 'status'
   | 'cleared'
@@ -48,6 +49,8 @@ export interface HubEvent {
   usage?: Usage;
   status?: string;
   error?: string;
+  step?: number;
+  total?: number;
   timestamp?: string;
   // ack-only fields
   client_id?: string;
@@ -192,6 +195,13 @@ function handleEvent(ev: HubEvent) {
       if (ev.origin === getClientID() && ev.audio_url && !get(muted)) {
         playAudio(ev.audio_url);
       }
+      break;
+    case 'portrait_progress':
+      // Intermediate preview frames stream during a render. Each frame
+      // lives at its own URL, so no cache-bust is needed — and skipping
+      // it keeps the URL stable for the brief window when the same
+      // frame might re-arrive on a reconnect.
+      if (ev.portrait_url) portraitURL.set(ev.portrait_url);
       break;
     case 'portrait_ready':
       if (ev.portrait_url) portraitURL.set(cacheBust(ev.portrait_url));
