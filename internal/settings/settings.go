@@ -138,6 +138,22 @@ type AppSettings struct {
 	ServerExposeNetwork bool   `json:"server_expose_network"`
 	ServerPort          int    `json:"server_port"`
 	ServerAuthToken     string `json:"server_auth_token"`
+	// SMS over Twilio. EnableSMS gates the whole feature so a fresh
+	// install with no Twilio account stays inert. The credentials are an
+	// Account SID + Auth Token pair from twilio.com/console (Main account
+	// or a subaccount); TwilioFromNumber is the E.164 number Diesel sends
+	// from and also the inbox we poll for incoming messages. Only senders
+	// listed in SMSAllowedNumbers get a reply — anyone else is silently
+	// dropped so a stranger who stumbles on the number can't run up the
+	// bill. SMSPollSeconds is how often the manager hits Twilio's
+	// Messages API to look for new inbound messages; 10 s is a reasonable
+	// default that stays well within Twilio's per-second rate limits.
+	EnableSMS          bool     `json:"enable_sms"`
+	TwilioAccountSID   string   `json:"twilio_account_sid"`
+	TwilioAuthToken    string   `json:"twilio_auth_token"`
+	TwilioFromNumber   string   `json:"twilio_from_number"`
+	SMSAllowedNumbers  []string `json:"sms_allowed_numbers"`
+	SMSPollSeconds     int      `json:"sms_poll_seconds"`
 }
 
 // Default returns the starting values used when no settings file exists
