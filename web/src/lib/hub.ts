@@ -302,3 +302,112 @@ function authHeaders(): Record<string, string> {
 export function getClientId(): string {
   return getClientID();
 }
+
+// ─── Settings API ──────────────────────────────────────────────────────
+// Thin wrappers over the /api/settings routes. Mirrors the AppSettings
+// struct on the Go side (internal/settings/settings.go) — keep field
+// names in sync with the JSON tags there. Secrets come back as the
+// sentinel "********"; sending the same sentinel back means "leave the
+// stored value alone", which is how the form avoids ever having to
+// know the real key.
+
+export const SECRET_MASK = '********';
+
+export interface AppSettings {
+  theme: string;
+  api_endpoint: string;
+  api_key: string;
+  model: string;
+  system_prompt: string;
+  history_messages: number;
+  stt_endpoint: string;
+  stt_api_key: string;
+  stt_model: string;
+  continuous_conversation: boolean;
+  enable_tts: boolean;
+  tts_endpoint: string;
+  tts_api_key: string;
+  tts_model: string;
+  tts_voice: string;
+  input_device: string;
+  output_device: string;
+  save_to_disk: boolean;
+  enable_image_gen: boolean;
+  comfyui_endpoint: string;
+  image_prompt: string;
+  image_clothing: string;
+  image_nudity: string;
+  image_negative_prompt: string;
+  image_steps: number;
+  enable_server: boolean;
+  server_expose_network: boolean;
+  server_port: number;
+  server_auth_token: string;
+}
+
+export async function fetchSettings(): Promise<AppSettings> {
+  const resp = await fetch('/api/settings', { headers: authHeaders() });
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  return resp.json();
+}
+
+export async function saveSettings(s: AppSettings): Promise<AppSettings> {
+  const resp = await fetch('/api/settings', {
+    method: 'POST',
+    headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+    body: JSON.stringify(s),
+  });
+  if (!resp.ok) {
+    const body = await resp.text();
+    throw new Error(body || `HTTP ${resp.status}`);
+  }
+  return resp.json();
+}
+
+export interface ProbeBody {
+  kind: 'llm' | 'stt' | 'tts' | 'image';
+  endpoint: string;
+  api_key?: string;
+  model?: string;
+  voice?: string;
+  text?: string;
+}
+
+export async function probeModels(body: ProbeBody): Promise<{ models: string[]; context_length?: number; error?: string }> {
+  const resp = await fetch('/api/settings/models', {
+    method: 'POST',
+    headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  return resp.json();
+}
+
+export async function testConnection(body: ProbeBody): Promise<string> {
+  const resp = await fetch('/api/settings/test', {
+    method: 'POST',
+    headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  const data = await resp.json();
+  return data.status || data.error || '';
+}
+
+// testTTS synthesizes a sample phrase and returns the audio blob (or
+// throws with the server's error message). The caller is responsible
+// for playing the blob and revoking its ObjectURL when done.
+export async function testTTS(body: ProbeBody): Promise<Blob> {
+  const resp = await fetch('/api/settings/test-tts', {
+    method: 'POST',
+    headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  const ct = resp.headers.get('Content-Type') || '';
+  if (ct.startsWith('application/json')) {
+    const data = await resp.json();
+    throw new Error(data.error || 'TTS failed');
+  }
+  return resp.blob();
+}
