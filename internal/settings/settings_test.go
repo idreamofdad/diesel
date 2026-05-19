@@ -47,6 +47,10 @@ func TestDefault_HasExpectedDefaults(t *testing.T) {
 	assert.NotEmpty(t, s.SystemPrompt, "system prompt has a baked-in default")
 	assert.Equal(t, "http://127.0.0.1:8188", s.ComfyUIEndpoint)
 	assert.Equal(t, 10, s.ImageSteps, "image steps default seeds the bundled workflow's Steps node")
+	assert.False(t, s.EnableServer, "HTTP server is opt-in")
+	assert.False(t, s.ServerExposeNetwork, "loopback-only is the safe default")
+	assert.Equal(t, 7777, s.ServerPort)
+	assert.Empty(t, s.ServerAuthToken, "no auth by default")
 }
 
 // modelsServer stands up an httptest server that responds to /models

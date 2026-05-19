@@ -14,6 +14,8 @@
 #   - Homebrew qt   (`brew install qt`)            — provides headers & macdeployqt
 #   - Go 1.22+      with cgo enabled
 #   - Xcode CLT     (`xcode-select --install`)     — clang for C++17
+#   - Node 20+ / npm                                — to build the embedded web UI
+#                                                     (`go generate ./...` runs Vite)
 
 version: 2
 
@@ -22,8 +24,16 @@ project_name: diesel
 before:
   hooks:
     - go mod tidy
-    # Fail fast if the bundler tool is missing instead of producing a broken .app.
+    # Fail fast if any of the prerequisite tools are missing instead of
+    # producing a broken .app. macdeployqt comes with Homebrew Qt; npm
+    # is required by the `go generate` step below.
     - sh -c 'command -v macdeployqt >/dev/null || { echo "macdeployqt not found — brew install qt" >&2; exit 1; }'
+    - sh -c 'command -v npm >/dev/null || { echo "npm not found — install Node 20+ before building" >&2; exit 1; }'
+    # Build the Svelte frontend into web/dist so //go:embed picks it
+    # up. `go generate` invokes Vite (see web/embed.go's directive).
+    # Runs before the Go build so the binary always ships with the
+    # current SPA — never falls through to the stub HTML.
+    - go generate ./...
 
 builds:
   - id: diesel
