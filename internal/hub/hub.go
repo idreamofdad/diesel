@@ -500,10 +500,35 @@ func (h *Hub) renderPortrait(ctx context.Context, s settings.AppSettings, reply 
 		return
 	}
 	prompt := composeImagePrompt(s, reply.Emotion, reply.Naked)
-	// onProgress callbacks are dropped — preview frames are an
-	// optimization the desktop GUI used to consume. Adding them
-	// back per-subscriber is a follow-up.
-	png, err := comfyui.Generate(ctx, s, prompt, s.ImageNegativePrompt, reply.Naked, nil)
+	// Stream sampler steps and intermediate preview frames as
+	// EventPortraitProgress so subscribers can paint the image as it
+	// develops. Preview bytes go into the previews cache and a
+	// per-frame URL rides along on the event. The callback runs on
+	// the comfyui goroutine; broadcast() is safe to call there.
+	var stepSeq int
+	var lastStep, lastTotal int
+	onProgress := func(p comfyui.Progress) {
+		ev := Event{
+			Type:      EventPortraitProgress,
+			Timestamp: time.Now(),
+		}
+		if p.Total > 0 {
+			lastStep = p.Step
+			lastTotal = p.Total
+		}
+		ev.Step = lastStep
+		ev.Total = lastTotal
+		if len(p.Preview) > 0 {
+			stepSeq++
+			id := fmt.Sprintf("%d-%d", turnID, stepSeq)
+			h.mu.Lock()
+			h.previews.put(id, p.Preview)
+			h.mu.Unlock()
+			ev.PortraitURL = "/api/portrait-preview/" + id
+		}
+		h.broadcast(ev)
+	}
+	png, err := comfyui.Generate(ctx, s, prompt, s.ImageNegativePrompt, reply.Naked, onProgress)
 	if err != nil || len(png) == 0 {
 		return
 	}
