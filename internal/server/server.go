@@ -233,6 +233,11 @@ func (m *Manager) buildRouter(token string) *gin.Engine {
 	api.GET("/portrait-preview/:id", m.handlePortraitPreview)
 	api.GET("/audio/:id", m.handleAudio)
 	api.GET("/ws", m.handleWS)
+	api.GET("/settings", m.handleSettingsGet)
+	api.POST("/settings", m.handleSettingsSave)
+	api.POST("/settings/models", m.handleSettingsModels)
+	api.POST("/settings/test", m.handleSettingsTest)
+	api.POST("/settings/test-tts", m.handleSettingsTestTTS)
 
 	// Static UI: serve the embedded SPA off /. The file server is wired
 	// up only when the embed actually contains an index.html — fresh

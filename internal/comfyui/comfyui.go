@@ -306,7 +306,7 @@ func Generate(ctx context.Context, s settings.AppSettings, positive, negative st
 	// Stderr trace of what we're actually sending. Visible when Diesel is
 	// launched from a terminal, invisible in the packaged .app — useful
 	// for verifying the emotion splice without adding UI noise.
-	log.Printf("[comfyui] seed=%d positive=%q negative=%q", seed, positive, negative)
+	log.Printf("[comfyui] seed=%d naked=%t nudity_node=%q positive=%q negative=%q", seed, naked, nudityID, positive, negative)
 
 	// Connect the WebSocket *before* submitting the job so we don't miss
 	// early "executing" / "progress" events. The same client_id ties the

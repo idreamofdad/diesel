@@ -1,11 +1,16 @@
 <script lang="ts">
   let { onsend, disabled }: { onsend: (text: string) => void; disabled: boolean } = $props();
   let text = $state('');
+  let input: HTMLInputElement;
+  // Disabling the input while a reply is in flight clears focus; flip
+  // this on submit so we restore focus the moment the field re-enables.
+  let refocusOnEnable = false;
 
   function submit() {
     if (!text.trim() || disabled) return;
     onsend(text);
     text = '';
+    refocusOnEnable = true;
   }
 
   function onkeydown(e: KeyboardEvent) {
@@ -14,6 +19,13 @@
       submit();
     }
   }
+
+  $effect(() => {
+    if (!disabled && refocusOnEnable && input) {
+      refocusOnEnable = false;
+      input.focus();
+    }
+  });
 </script>
 
 <div class="row">
@@ -21,6 +33,7 @@
     type="text"
     placeholder="Type a message…"
     bind:value={text}
+    bind:this={input}
     onkeydown={onkeydown}
     {disabled}
   />
