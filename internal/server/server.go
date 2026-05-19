@@ -230,6 +230,7 @@ func (m *Manager) buildRouter(token string) *gin.Engine {
 	api.POST("/clear", m.handleClear)
 	api.POST("/transcribe", m.handleTranscribe)
 	api.GET("/portrait/:id", m.handlePortrait)
+	api.GET("/portrait-preview/:id", m.handlePortraitPreview)
 	api.GET("/audio/:id", m.handleAudio)
 	api.GET("/ws", m.handleWS)
 
@@ -490,6 +491,22 @@ func (m *Manager) handlePortrait(c *gin.Context) {
 		return
 	}
 	c.Data(http.StatusOK, "image/png", png)
+}
+
+// handlePortraitPreview serves a cached intermediate preview frame
+// (ComfyUI ships JPEG by default, sometimes PNG). Content-Type is
+// sniffed because we forward whatever the upstream sent — both formats
+// render fine in <img> tags and QPixmap. Frames evict quickly as new
+// ones arrive, so 404 here is expected for older frames.
+func (m *Manager) handlePortraitPreview(c *gin.Context) {
+	id := c.Param("id")
+	data, ok := m.hub.PortraitPreview(id)
+	if !ok {
+		c.Status(http.StatusNotFound)
+		return
+	}
+	ct := http.DetectContentType(data)
+	c.Data(http.StatusOK, ct, data)
 }
 
 // handleAudio serves cached TTS audio. Content-Type is left to the
