@@ -10,12 +10,12 @@
     usage,
     sendMessage,
     muted,
-    authToken,
   } from './lib/hub';
   import Transcript from './lib/Transcript.svelte';
   import ChatInput from './lib/ChatInput.svelte';
   import MicButton from './lib/MicButton.svelte';
   import Portrait from './lib/Portrait.svelte';
+  import Settings from './lib/Settings.svelte';
 
   let messages = $state<any[]>([]);
   let status = $state('Connecting…');
@@ -24,7 +24,6 @@
   let online = $state(false);
   let tokens = $state<{ prompt_tokens?: number; completion_tokens?: number; total_tokens?: number }>({});
   let mutedNow = $state(false);
-  let token = $state('');
   let showSettings = $state(false);
 
   // Wire the imperative stores to local $state — the templates can't
@@ -38,7 +37,6 @@
       connected.subscribe(v => { online = v; }),
       usage.subscribe(v => { tokens = v; }),
       muted.subscribe(v => { mutedNow = v; }),
-      authToken.subscribe(v => { token = v; }),
     ];
     connect();
     return () => unsubs.forEach(u => u());
@@ -58,10 +56,10 @@
     muted.set(!mutedNow);
   }
 
-  function saveToken() {
-    authToken.set(token.trim());
+  function closeSettings() {
     showSettings = false;
-    // Reconnect so the new token takes effect on the WS.
+    // Reconnect so any auth-token change picked up by the dialog
+    // takes effect on the WebSocket immediately.
     connect();
   }
 </script>
@@ -79,13 +77,7 @@
   </header>
 
   {#if showSettings}
-    <div class="settings">
-      <label>
-        Auth token:
-        <input type="password" bind:value={token} placeholder="(blank if server has no auth)" />
-      </label>
-      <button onclick={saveToken}>Save</button>
-    </div>
+    <Settings onclose={closeSettings} />
   {/if}
 
   <section class="body">
@@ -108,11 +100,6 @@
 </main>
 
 <style>
-  /* Flex column rather than a fixed-row grid: the optional settings
-     panel toggles in and out, and a fixed grid-template-rows pushes
-     the footer into the wrong row when one of the children is
-     missing. flex+min-height:0 keeps the body section absorbing all
-     available space with the footer pinned at the bottom either way. */
   main {
     display: flex;
     flex-direction: column;
@@ -130,18 +117,6 @@
   .actions { display: flex; gap: 0.5rem; align-items: center; }
   .conn { font-size: 0.85rem; color: var(--muted); }
   .conn.online { color: #6ec46e; }
-
-  .settings {
-    flex: 0 0 auto;
-    display: flex;
-    gap: 0.5rem;
-    align-items: center;
-    padding: 0.6rem 1rem;
-    border-bottom: 1px solid var(--border);
-    background: #262626;
-  }
-  .settings label { display: flex; align-items: center; gap: 0.5rem; flex: 1; }
-  .settings input { flex: 1; }
 
   .body {
     flex: 1 1 auto;
