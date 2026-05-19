@@ -512,7 +512,7 @@
     gap: 0.5rem;
     color: var(--text);
   }
-  .form input[type="checkbox"] { margin: 0; }
+  .form input[type="checkbox"] { width: auto; margin: 0; flex: none; }
   .form input, .form textarea, .form select {
     width: 100%;
     color: var(--text);
