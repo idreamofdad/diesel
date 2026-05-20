@@ -144,6 +144,30 @@ func setNudity(graph map[string]workflowNode, naked bool) string {
 	return ""
 }
 
+// findTitledPrimitiveInt returns the PrimitiveInt node whose `_meta.title`
+// equals `title`, or ("", zero) when the workflow has no such node. The
+// bundled workflow exposes several of these as single-value knobs —
+// Steps, Width, Height — that Generate rewrites per call. Sorted
+// iteration keeps the choice deterministic if a re-export ever duplicates
+// a title.
+func findTitledPrimitiveInt(graph map[string]workflowNode, title string) (string, workflowNode) {
+	ids := make([]string, 0, len(graph))
+	for id := range graph {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		n := graph[id]
+		if n.ClassType != "PrimitiveInt" {
+			continue
+		}
+		if t, _ := n.Meta["title"].(string); t == title {
+			return id, n
+		}
+	}
+	return "", workflowNode{}
+}
+
 // setSteps overrides the sampler step count by writing to the
 // PrimitiveInt node titled "Steps" in `graph`. The bundled workflow
 // wires that node into both the sampler's `steps` and `end_at_step`
@@ -156,26 +180,38 @@ func setSteps(graph map[string]workflowNode, steps int) string {
 	if steps <= 0 {
 		return ""
 	}
-	ids := make([]string, 0, len(graph))
-	for id := range graph {
-		ids = append(ids, id)
+	id, n := findTitledPrimitiveInt(graph, "Steps")
+	if id == "" {
+		return ""
 	}
-	sort.Strings(ids)
-	for _, id := range ids {
-		n := graph[id]
-		if n.ClassType != "PrimitiveInt" {
-			continue
-		}
-		title, _ := n.Meta["title"].(string)
-		if title != "Steps" {
-			continue
-		}
-		if _, ok := n.Inputs["value"]; ok {
-			n.Inputs["value"] = steps
-			return id
-		}
+	if _, ok := n.Inputs["value"]; !ok {
+		return ""
 	}
-	return ""
+	n.Inputs["value"] = steps
+	return id
+}
+
+// applyLandscape transposes the workflow's "Width" and "Height"
+// PrimitiveInt values so the render comes out wide rather than tall.
+// Called only for Telegram-originated turns — Telegram displays photos
+// landscape, while the desktop/web portrait panel wants the workflow's
+// baked portrait dimensions. Transposing (rather than writing fixed
+// numbers) keeps the workflow JSON the single source of truth for the
+// resolution. No-ops cleanly when either primitive is missing its node
+// or `value`. Returns the two matched node IDs for tracing.
+func applyLandscape(graph map[string]workflowNode) (widthID, heightID string) {
+	wID, wNode := findTitledPrimitiveInt(graph, "Width")
+	hID, hNode := findTitledPrimitiveInt(graph, "Height")
+	if wID == "" || hID == "" {
+		return "", ""
+	}
+	wVal, wOK := wNode.Inputs["value"]
+	hVal, hOK := hNode.Inputs["value"]
+	if !wOK || !hOK {
+		return "", ""
+	}
+	wNode.Inputs["value"], hNode.Inputs["value"] = hVal, wVal
+	return wID, hID
 }
 
 // setConnectedText follows sampler.<key> — a ComfyUI input connection of
