@@ -389,13 +389,15 @@ func (m *Manager) dispatchLoop(ctx context.Context, sub *hub.Subscriber, bot *tg
 	var typingCancel context.CancelFunc
 	// awaitingPortrait maps a hub turn ID to where that turn's reply
 	// landed, populated when a Telegram turn completes and consumed when
-	// its portrait_ready arrives. lastPortrait holds the message ID of
-	// the portrait photo currently shown in each chat, so it can be
-	// deleted when the next turn replaces (or clears) it. Both are
-	// in-memory — a restart orphans any portrait already in a chat, the
-	// same tradeoff the queue makes.
+	// its portrait_ready arrives. In-memory only — turn IDs reset each
+	// run, so a turn in flight across a restart is simply dropped.
+	//
+	// lastPortrait holds the message ID of the portrait photo currently
+	// shown in each chat, so it can be deleted when the next turn
+	// replaces (or clears) it. This one is persisted: without it a
+	// restart would forget the posted portraits and never clean them up.
 	awaitingPortrait := map[int64]turnRef{}
-	lastPortrait := map[int64]int{}
+	lastPortrait := loadPortraitState()
 	stopTyping := func() {
 		if typingCancel != nil {
 			typingCancel()
@@ -492,11 +494,13 @@ func (m *Manager) dispatchLoop(ctx context.Context, sub *hub.Subscriber, bot *tg
 					// empty.
 					m.deletePortrait(bot, lastPortrait, ref.chatID)
 					lastPortrait[ref.chatID] = newID
+					persistPortraits(lastPortrait)
 					break
 				}
 				// Image gen off or the render failed — no replacement is
 				// coming, so drop the now-stale portrait outright.
 				m.deletePortrait(bot, lastPortrait, ref.chatID)
+				persistPortraits(lastPortrait)
 			case hub.EventTurnError:
 				if mine {
 					stopTyping()
@@ -668,6 +672,15 @@ func (m *Manager) deletePortrait(bot *tgbotapi.BotAPI, lastPortrait map[int64]in
 	delete(lastPortrait, chatID)
 	if _, err := bot.Request(tgbotapi.NewDeleteMessage(chatID, msgID)); err != nil {
 		log.Printf("[telegram] delete portrait %d in chat %d: %v", msgID, chatID, err)
+	}
+}
+
+// persistPortraits writes the chat → portrait-message-ID map to disk so
+// a restart can still delete a stale portrait when its replacement is
+// posted. Best-effort: a failed write is logged, not fatal.
+func persistPortraits(lastPortrait map[int64]int) {
+	if err := savePortraitState(lastPortrait); err != nil {
+		log.Printf("[telegram] save portrait state: %v", err)
 	}
 }
 

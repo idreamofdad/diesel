@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"diesel/internal/util"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -58,4 +60,42 @@ func TestState_CorruptFile(t *testing.T) {
 	out, found := loadState()
 	assert.False(t, found)
 	assert.Zero(t, out.Offset)
+}
+
+// TestPortraitState_Roundtrip — save → load restores the chat → portrait
+// message map, including the negative chat IDs Telegram uses. This is
+// the contract that lets a restart still delete a portrait posted before
+// it.
+func TestPortraitState_Roundtrip(t *testing.T) {
+	withTempConfigDir(t)
+
+	in := map[int64]int{12345: 67, -100200300: 89}
+	require.NoError(t, savePortraitState(in))
+
+	assert.Equal(t, in, loadPortraitState())
+}
+
+// TestPortraitState_MissingFile — a fresh install has no file; load
+// yields an empty, non-nil map the dispatch loop can index freely.
+func TestPortraitState_MissingFile(t *testing.T) {
+	withTempConfigDir(t)
+
+	out := loadPortraitState()
+	assert.NotNil(t, out)
+	assert.Empty(t, out)
+}
+
+// TestPortraitState_CorruptFile — a hand-edited or half-written file
+// must not crash the loader; it falls back to an empty map.
+func TestPortraitState_CorruptFile(t *testing.T) {
+	withTempConfigDir(t)
+
+	path, err := util.ConfigFilePath(portraitStateFileName)
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	require.NoError(t, os.WriteFile(path, []byte("{not json"), 0o600))
+
+	out := loadPortraitState()
+	assert.NotNil(t, out)
+	assert.Empty(t, out)
 }
