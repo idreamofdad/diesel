@@ -148,12 +148,23 @@ type AppSettings struct {
 	// bill. SMSPollSeconds is how often the manager hits Twilio's
 	// Messages API to look for new inbound messages; 10 s is a reasonable
 	// default that stays well within Twilio's per-second rate limits.
-	EnableSMS          bool     `json:"enable_sms"`
-	TwilioAccountSID   string   `json:"twilio_account_sid"`
-	TwilioAuthToken    string   `json:"twilio_auth_token"`
-	TwilioFromNumber   string   `json:"twilio_from_number"`
-	SMSAllowedNumbers  []string `json:"sms_allowed_numbers"`
-	SMSPollSeconds     int      `json:"sms_poll_seconds"`
+	EnableSMS         bool     `json:"enable_sms"`
+	TwilioAccountSID  string   `json:"twilio_account_sid"`
+	TwilioAuthToken   string   `json:"twilio_auth_token"`
+	TwilioFromNumber  string   `json:"twilio_from_number"`
+	SMSAllowedNumbers []string `json:"sms_allowed_numbers"`
+	SMSPollSeconds    int      `json:"sms_poll_seconds"`
+	// Telegram bot bridge. EnableTelegram gates the whole feature so a
+	// fresh install with no bot stays inert. TelegramBotToken is the
+	// token @BotFather hands out — it identifies the bot, the same way
+	// the Twilio SID/token pair identifies the SMS account. Inbound is
+	// getUpdates long-poll, so there's no poll-interval knob. Only DMs
+	// from a sender whose @username is in TelegramAllowedUsernames get a
+	// reply; anyone else is silently dropped so a stranger who finds the
+	// bot can't run up the LLM bill.
+	EnableTelegram           bool     `json:"enable_telegram"`
+	TelegramBotToken         string   `json:"telegram_bot_token"`
+	TelegramAllowedUsernames []string `json:"telegram_allowed_usernames"`
 }
 
 // Default returns the starting values used when no settings file exists
