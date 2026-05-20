@@ -50,15 +50,22 @@ const (
 )
 
 // Message is the wire shape for an OpenAI-compatible /chat/completions
-// turn. We also keep a slice of these in memory as the conversation log,
-// stamped with the wall-clock time the turn occurred so the model can
-// reason about elapsed time. Timestamp is folded into Content before each
-// request and zeroed on the outgoing copy, so the wire body stays a plain
-// role/content pair.
+// turn. We also keep a slice of these in memory (and on disk) as the
+// conversation log, stamped with the wall-clock time the turn occurred so
+// the model can reason about elapsed time. Timestamp and Emotion are
+// bookkeeping fields: Timestamp is folded into Content before each
+// request, and both are zeroed on the outgoing copy, so the wire body
+// stays a plain role/content pair.
 type Message struct {
 	Role      string    `json:"role"`
 	Content   string    `json:"content"`
 	Timestamp time.Time `json:"timestamp,omitempty"`
+	// Emotion is the expression the model chose for an assistant turn
+	// (one of Emotions). Stored on the message so the next request can
+	// remind the model of its previous expression — see lastEmotion.
+	// Empty on user/system messages and on assistant turns from older
+	// conversation files saved before this field existed.
+	Emotion string `json:"emotion,omitempty"`
 }
 
 // thinkBlock matches the <think>…</think> reasoning blocks some OSS models
@@ -126,6 +133,19 @@ var EmotionPrompts = map[string]string{
 	"horny":             "flushed cheeks, half-lidded eyes, parted lips, biting lower lip, aroused expression, smirk",
 }
 
+// lastEmotion returns the Emotion of the most recent assistant message
+// in `history`, or "" when the conversation has no assistant turn yet
+// (or it predates the Emotion field). Used to feed the model its own
+// previous expression for portrait continuity.
+func lastEmotion(history []Message) string {
+	for i := len(history) - 1; i >= 0; i-- {
+		if history[i].Role == RoleAssistant {
+			return history[i].Emotion
+		}
+	}
+	return ""
+}
+
 // Completion sends `history` (oldest→newest) to the configured endpoint
 // and returns the assistant's structured reply along with the server-
 // reported token usage (zero-valued struct when the server didn't include
@@ -168,6 +188,15 @@ func Completion(ctx context.Context, s settings.AppSettings, history []Message) 
 	if sp := strings.TrimSpace(s.SystemPrompt); sp != "" {
 		msgs = append(msgs, Message{Role: RoleSystem, Content: sp})
 	}
+	// Remind the model of the expression it last wore so the portrait
+	// emotion has some turn-to-turn continuity. Skipped on the first turn
+	// of a conversation, where there's no prior assistant reply.
+	if e := lastEmotion(history); e != "" {
+		msgs = append(msgs, Message{
+			Role:    RoleSystem,
+			Content: "Your facial expression in your previous reply was: " + e,
+		})
+	}
 	start := 0
 	switch {
 	case s.HistoryMessages <= 0:
@@ -184,6 +213,10 @@ func Completion(ctx context.Context, s settings.AppSettings, history []Message) 
 			m.Content = "[" + m.Timestamp.Format("2006-01-02 15:04:05 MST") + "] " + m.Content
 			m.Timestamp = time.Time{}
 		}
+		// Emotion is internal bookkeeping — strip it so the wire body
+		// stays a plain role/content pair. The model's prior expression
+		// is fed back via the system message above, not on the turn.
+		m.Emotion = ""
 		msgs = append(msgs, m)
 	}
 
