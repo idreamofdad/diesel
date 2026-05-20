@@ -10,21 +10,21 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestConfigFor_NormalizesAllowed — the dialog's textarea is free-form:
-// users type "@Alice", "alice", or a blank trailing line. configFor must
-// strip the '@', lower-case, and drop blanks before the manager sees it.
-func TestConfigFor_NormalizesAllowed(t *testing.T) {
+// TestConfigFor_NormalizesUsername — the dialog field is free-form: the
+// user might type "@Alice", "alice", or pad it with spaces. configFor
+// must strip the '@', lower-case, and trim before the manager sees it.
+func TestConfigFor_NormalizesUsername(t *testing.T) {
 	cfg := configFor(settings.AppSettings{
-		EnableTelegram:           true,
-		TelegramAllowedUsernames: []string{"@Alice", "  bob ", "", "  ", "@@weird"},
+		EnableTelegram:          true,
+		TelegramAllowedUsername: "  @Alice ",
 	})
-	assert.Equal(t, []string{"alice", "bob", "@weird"}, cfg.allowed)
+	assert.Equal(t, "alice", cfg.allowed)
 }
 
 // TestConfig_Validate — fields are checked in order; the message names
 // the missing one so the Settings dialog status row is actionable.
 func TestConfig_Validate(t *testing.T) {
-	full := config{enabled: true, token: "123:ABC", allowed: []string{"alice"}}
+	full := config{enabled: true, token: "123:ABC", allowed: "alice"}
 	require.NoError(t, full.validate())
 
 	c := full
@@ -32,43 +32,41 @@ func TestConfig_Validate(t *testing.T) {
 	assert.ErrorContains(t, c.validate(), "Bot Token")
 
 	c = full
-	c.allowed = nil
+	c.allowed = ""
 	assert.ErrorContains(t, c.validate(), "allowed")
 }
 
 // TestIsAllowed_CaseInsensitive — Telegram usernames are case-insensitive
 // and reported without the '@'. A sender typed into the dialog as
-// "@Alice" must authorize the "alice" Telegram delivers.
+// "@Alice" must authorize the "alice" Telegram delivers, and nobody else.
 func TestIsAllowed_CaseInsensitive(t *testing.T) {
-	cfg := configFor(settings.AppSettings{
-		TelegramAllowedUsernames: []string{"@Alice", "bob"},
-	})
+	cfg := configFor(settings.AppSettings{TelegramAllowedUsername: "@Alice"})
 	assert.True(t, cfg.isAllowed("alice"))
 	assert.True(t, cfg.isAllowed("ALICE"))
-	assert.True(t, cfg.isAllowed("@Bob"))
-	assert.False(t, cfg.isAllowed("carol"))
+	assert.True(t, cfg.isAllowed("@Alice"))
+	assert.False(t, cfg.isAllowed("bob"))
 }
 
 // TestIsAllowed_EmptyUsername — a sender who never set a username can
-// never match, so they're dropped. An empty allow-list entry must not
-// turn into a wildcard that authorizes them.
+// never match, so they're dropped. An unconfigured allow-list must not
+// authorize a usernameless sender either: empty must not match empty.
 func TestIsAllowed_EmptyUsername(t *testing.T) {
-	cfg := config{allowed: []string{"alice"}}
+	cfg := config{allowed: "alice"}
 	assert.False(t, cfg.isAllowed(""))
 	assert.False(t, cfg.isAllowed("  "))
 
-	empty := config{allowed: nil}
+	empty := config{allowed: ""}
 	assert.False(t, empty.isAllowed(""))
 }
 
 // TestConfig_Equal — used by Apply to skip a goroutine bounce on a no-op
 // save. Order in the allowed list is part of the identity.
 func TestConfig_Equal(t *testing.T) {
-	a := config{enabled: true, token: "tk", allowed: []string{"alice", "bob"}}
+	a := config{enabled: true, token: "tk", allowed: "alice"}
 	b := a
 	assert.True(t, a.equal(b))
 
-	b.allowed = []string{"bob", "alice"} // order matters
+	b.allowed = "bob"
 	assert.False(t, a.equal(b))
 
 	b = a
