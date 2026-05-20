@@ -45,7 +45,10 @@ type Client struct {
 
 // Message is a single row from Twilio's Messages.json list endpoint.
 // Only the fields the poller actually reads are decoded; Twilio sends
-// a fat object (price, status, segments, …) we don't need.
+// a fat object (price, segments, …) we don't need. Status / ErrorCode
+// / ErrorMessage are populated when we re-fetch a sent message to
+// check whether it actually reached the recipient — Twilio's initial
+// 201 only says "accepted to queue," not "delivered."
 type Message struct {
 	SID       string `json:"sid"`
 	From      string `json:"from"`
@@ -57,6 +60,15 @@ type Message struct {
 	// parsed lazily so a format change on the server side doesn't
 	// crash unmarshalling.
 	DateSent string `json:"date_sent"`
+	// Status is one of queued, sending, sent, delivered, undelivered,
+	// failed, received, accepted. Only meaningful on a re-fetch — the
+	// initial Send response always returns "queued" or "accepted".
+	Status string `json:"status"`
+	// ErrorCode is Twilio's numeric failure code (e.g. 30007 carrier
+	// violation, 21408 permission-to-send denied). Pointer so we can
+	// tell "no error reported yet" (nil) apart from a real zero.
+	ErrorCode    *int   `json:"error_code"`
+	ErrorMessage string `json:"error_message"`
 }
 
 // ParsedDateSent returns DateSent as a time.Time, falling back to the
@@ -222,6 +234,36 @@ func (c *Client) Send(ctx context.Context, from, to, body string) (Message, erro
 		return Message{}, err
 	}
 	return msg, nil
+}
+
+// Fetch returns the current state of a previously-sent message. Used
+// to check delivery: Twilio's initial 201 only says the message was
+// queued, and the real outcome (delivered / failed / undelivered)
+// shows up on the resource a few seconds later.
+func (c *Client) Fetch(ctx context.Context, sid string) (Message, error) {
+	if c.AccountSID == "" || c.AuthToken == "" {
+		return Message{}, fmt.Errorf("twilio: missing credentials")
+	}
+	endpoint := fmt.Sprintf("%s/2010-04-01/Accounts/%s/Messages/%s.json",
+		c.base(), url.PathEscape(c.AccountSID), url.PathEscape(sid))
+	req, err := http.NewRequestWithContext(ctx, "GET", endpoint, nil)
+	if err != nil {
+		return Message{}, err
+	}
+	req.SetBasicAuth(c.AccountSID, c.AuthToken)
+	resp, err := c.client().Do(req)
+	if err != nil {
+		return Message{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return Message{}, util.HTTPStatusError(resp, 512)
+	}
+	var m Message
+	if err := json.NewDecoder(resp.Body).Decode(&m); err != nil {
+		return Message{}, err
+	}
+	return m, nil
 }
 
 // Ping verifies the credentials by fetching the account record. Used by
