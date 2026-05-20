@@ -10,8 +10,14 @@
   },
   "5": {
     "inputs": {
-      "width": 896,
-      "height": 1152,
+      "width": [
+        "58",
+        0
+      ],
+      "height": [
+        "59",
+        0
+      ],
       "batch_size": 1
     },
     "class_type": "EmptyLatentImage",
@@ -177,6 +183,24 @@
     "class_type": "PrimitiveInt",
     "_meta": {
       "title": "Steps"
+    }
+  },
+  "58": {
+    "inputs": {
+      "value": 896
+    },
+    "class_type": "PrimitiveInt",
+    "_meta": {
+      "title": "Width"
+    }
+  },
+  "59": {
+    "inputs": {
+      "value": 1152
+    },
+    "class_type": "PrimitiveInt",
+    "_meta": {
+      "title": "Height"
     }
   }
 }

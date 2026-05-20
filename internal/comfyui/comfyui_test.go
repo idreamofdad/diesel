@@ -440,6 +440,83 @@ func TestSetSteps_OnEmbeddedWorkflow(t *testing.T) {
 	assert.Equal(t, 1, g[id].Inputs["value"])
 }
 
+func TestApplyLandscape(t *testing.T) {
+	cases := []struct {
+		name           string
+		graph          map[string]workflowNode
+		wantW, wantH   string
+		wantWV, wantHV any // node values expected after the call
+	}{
+		{
+			name: "Width and Height values are transposed",
+			graph: map[string]workflowNode{
+				"58": titled("PrimitiveInt", "Width", map[string]any{"value": float64(896)}),
+				"59": titled("PrimitiveInt", "Height", map[string]any{"value": float64(1152)}),
+			},
+			wantW: "58", wantH: "59",
+			wantWV: float64(1152), wantHV: float64(896),
+		},
+		{
+			name: "missing Height is a silent no-op",
+			graph: map[string]workflowNode{
+				"58": titled("PrimitiveInt", "Width", map[string]any{"value": float64(896)}),
+			},
+		},
+		{
+			name: "missing Width is a silent no-op",
+			graph: map[string]workflowNode{
+				"59": titled("PrimitiveInt", "Height", map[string]any{"value": float64(1152)}),
+			},
+		},
+		{
+			name: "Width title on a non-int node is ignored",
+			graph: map[string]workflowNode{
+				"58": titled("PrimitiveFloat", "Width", map[string]any{"value": float64(896)}),
+				"59": titled("PrimitiveInt", "Height", map[string]any{"value": float64(1152)}),
+			},
+		},
+		{
+			name: "missing value input means no transpose",
+			graph: map[string]workflowNode{
+				"58": titled("PrimitiveInt", "Width", map[string]any{}),
+				"59": titled("PrimitiveInt", "Height", map[string]any{"value": float64(1152)}),
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gotW, gotH := applyLandscape(tc.graph)
+			assert.Equal(t, tc.wantW, gotW)
+			assert.Equal(t, tc.wantH, gotH)
+			if tc.wantW != "" {
+				assert.Equal(t, tc.wantWV, tc.graph[tc.wantW].Inputs["value"])
+				assert.Equal(t, tc.wantHV, tc.graph[tc.wantH].Inputs["value"])
+			}
+		})
+	}
+}
+
+func TestApplyLandscape_OnEmbeddedWorkflow(t *testing.T) {
+	// Round-trip against the shipped graph so a re-export that drops the
+	// Width/Height titles or the PrimitiveInt class fails here instead of
+	// silently rendering Telegram turns in portrait.
+	var g map[string]workflowNode
+	require.NoError(t, json.Unmarshal([]byte(defaultWorkflow), &g))
+
+	wID, wNode := findTitledPrimitiveInt(g, "Width")
+	hID, hNode := findTitledPrimitiveInt(g, "Height")
+	require.NotEmpty(t, wID, "embedded workflow should expose a Width primitive")
+	require.NotEmpty(t, hID, "embedded workflow should expose a Height primitive")
+	origW, origH := wNode.Inputs["value"], hNode.Inputs["value"]
+	require.NotEqual(t, origW, origH, "default workflow should not be square")
+
+	gotW, gotH := applyLandscape(g)
+	assert.Equal(t, wID, gotW)
+	assert.Equal(t, hID, gotH)
+	assert.Equal(t, origH, g[wID].Inputs["value"], "width takes the old height")
+	assert.Equal(t, origW, g[hID].Inputs["value"], "height takes the old width")
+}
+
 func TestSetNudity_OnEmbeddedWorkflow(t *testing.T) {
 	// Round-trip against the actual graph shipped in the binary, so a
 	// re-export of default_workflow.json that drops the Nudity title or

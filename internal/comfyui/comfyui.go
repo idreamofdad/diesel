@@ -258,11 +258,12 @@ type Progress struct {
 // intermediate preview frames as binary messages. It runs on the
 // goroutine driving Generate, so a Qt-thread caller should funnel
 // updates through a channel.
-func Generate(ctx context.Context, s settings.AppSettings, positive, negative string, naked bool, onProgress func(Progress)) ([]byte, error) {
+func Generate(ctx context.Context, s settings.AppSettings, positive, negative string, naked, landscape bool, onProgress func(Progress)) ([]byte, error) {
 	ctx, span := tracing.StartSpan(ctx, "image.generate",
 		attribute.Int("image.prompt.length", len(positive)),
 		attribute.Int("image.negative_prompt.length", len(negative)),
 		attribute.Bool("image.naked", naked),
+		attribute.Bool("image.landscape", landscape),
 	)
 	defer span.End()
 
@@ -327,6 +328,16 @@ func Generate(ctx context.Context, s settings.AppSettings, positive, negative st
 			attribute.Int("workflow.steps_value", s.ImageSteps),
 		)
 	}
+	var widthID, heightID string
+	if landscape {
+		widthID, heightID = applyLandscape(graph)
+		if widthID != "" {
+			rewriteSpan.SetAttributes(
+				attribute.String("workflow.width_id", widthID),
+				attribute.String("workflow.height_id", heightID),
+			)
+		}
+	}
 	rewriteSpan.End()
 	_ = rewriteCtx
 	span.SetAttributes(
@@ -339,10 +350,16 @@ func Generate(ctx context.Context, s settings.AppSettings, positive, negative st
 	if stepsID != "" {
 		span.SetAttributes(attribute.String("workflow.steps_id", stepsID))
 	}
+	if widthID != "" {
+		span.SetAttributes(
+			attribute.String("workflow.width_id", widthID),
+			attribute.String("workflow.height_id", heightID),
+		)
+	}
 	// Stderr trace of what we're actually sending. Visible when Diesel is
 	// launched from a terminal, invisible in the packaged .app — useful
 	// for verifying the emotion splice without adding UI noise.
-	log.Printf("[comfyui] seed=%d naked=%t nudity_node=%q positive=%q negative=%q", seed, naked, nudityID, positive, negative)
+	log.Printf("[comfyui] seed=%d naked=%t landscape=%t nudity_node=%q positive=%q negative=%q", seed, naked, landscape, nudityID, positive, negative)
 
 	// Connect the WebSocket *before* submitting the job so we don't miss
 	// early "executing" / "progress" events. The same client_id ties the
