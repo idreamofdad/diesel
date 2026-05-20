@@ -144,6 +144,30 @@ func setNudity(graph map[string]workflowNode, naked bool) string {
 	return ""
 }
 
+// findTitledPrimitiveInt returns the PrimitiveInt node whose `_meta.title`
+// equals `title`, or ("", zero) when the workflow has no such node. The
+// bundled workflow exposes several of these as single-value knobs —
+// Steps, Width, Height — that Generate rewrites per call. Sorted
+// iteration keeps the choice deterministic if a re-export ever duplicates
+// a title.
+func findTitledPrimitiveInt(graph map[string]workflowNode, title string) (string, workflowNode) {
+	ids := make([]string, 0, len(graph))
+	for id := range graph {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		n := graph[id]
+		if n.ClassType != "PrimitiveInt" {
+			continue
+		}
+		if t, _ := n.Meta["title"].(string); t == title {
+			return id, n
+		}
+	}
+	return "", workflowNode{}
+}
+
 // setSteps overrides the sampler step count by writing to the
 // PrimitiveInt node titled "Steps" in `graph`. The bundled workflow
 // wires that node into both the sampler's `steps` and `end_at_step`
@@ -156,26 +180,38 @@ func setSteps(graph map[string]workflowNode, steps int) string {
 	if steps <= 0 {
 		return ""
 	}
-	ids := make([]string, 0, len(graph))
-	for id := range graph {
-		ids = append(ids, id)
+	id, n := findTitledPrimitiveInt(graph, "Steps")
+	if id == "" {
+		return ""
 	}
-	sort.Strings(ids)
-	for _, id := range ids {
-		n := graph[id]
-		if n.ClassType != "PrimitiveInt" {
-			continue
-		}
-		title, _ := n.Meta["title"].(string)
-		if title != "Steps" {
-			continue
-		}
-		if _, ok := n.Inputs["value"]; ok {
-			n.Inputs["value"] = steps
-			return id
-		}
+	if _, ok := n.Inputs["value"]; !ok {
+		return ""
 	}
-	return ""
+	n.Inputs["value"] = steps
+	return id
+}
+
+// applyLandscape transposes the workflow's "Width" and "Height"
+// PrimitiveInt values so the render comes out wide rather than tall.
+// Called only for Telegram-originated turns — Telegram displays photos
+// landscape, while the desktop/web portrait panel wants the workflow's
+// baked portrait dimensions. Transposing (rather than writing fixed
+// numbers) keeps the workflow JSON the single source of truth for the
+// resolution. No-ops cleanly when either primitive is missing its node
+// or `value`. Returns the two matched node IDs for tracing.
+func applyLandscape(graph map[string]workflowNode) (widthID, heightID string) {
+	wID, wNode := findTitledPrimitiveInt(graph, "Width")
+	hID, hNode := findTitledPrimitiveInt(graph, "Height")
+	if wID == "" || hID == "" {
+		return "", ""
+	}
+	wVal, wOK := wNode.Inputs["value"]
+	hVal, hOK := hNode.Inputs["value"]
+	if !wOK || !hOK {
+		return "", ""
+	}
+	wNode.Inputs["value"], hNode.Inputs["value"] = hVal, wVal
+	return wID, hID
 }
 
 // setConnectedText follows sampler.<key> — a ComfyUI input connection of
@@ -222,11 +258,12 @@ type Progress struct {
 // intermediate preview frames as binary messages. It runs on the
 // goroutine driving Generate, so a Qt-thread caller should funnel
 // updates through a channel.
-func Generate(ctx context.Context, s settings.AppSettings, positive, negative string, naked bool, onProgress func(Progress)) ([]byte, error) {
+func Generate(ctx context.Context, s settings.AppSettings, positive, negative string, naked, landscape bool, onProgress func(Progress)) ([]byte, error) {
 	ctx, span := tracing.StartSpan(ctx, "image.generate",
 		attribute.Int("image.prompt.length", len(positive)),
 		attribute.Int("image.negative_prompt.length", len(negative)),
 		attribute.Bool("image.naked", naked),
+		attribute.Bool("image.landscape", landscape),
 	)
 	defer span.End()
 
@@ -291,6 +328,16 @@ func Generate(ctx context.Context, s settings.AppSettings, positive, negative st
 			attribute.Int("workflow.steps_value", s.ImageSteps),
 		)
 	}
+	var widthID, heightID string
+	if landscape {
+		widthID, heightID = applyLandscape(graph)
+		if widthID != "" {
+			rewriteSpan.SetAttributes(
+				attribute.String("workflow.width_id", widthID),
+				attribute.String("workflow.height_id", heightID),
+			)
+		}
+	}
 	rewriteSpan.End()
 	_ = rewriteCtx
 	span.SetAttributes(
@@ -303,10 +350,16 @@ func Generate(ctx context.Context, s settings.AppSettings, positive, negative st
 	if stepsID != "" {
 		span.SetAttributes(attribute.String("workflow.steps_id", stepsID))
 	}
+	if widthID != "" {
+		span.SetAttributes(
+			attribute.String("workflow.width_id", widthID),
+			attribute.String("workflow.height_id", heightID),
+		)
+	}
 	// Stderr trace of what we're actually sending. Visible when Diesel is
 	// launched from a terminal, invisible in the packaged .app — useful
 	// for verifying the emotion splice without adding UI noise.
-	log.Printf("[comfyui] seed=%d naked=%t nudity_node=%q positive=%q negative=%q", seed, naked, nudityID, positive, negative)
+	log.Printf("[comfyui] seed=%d naked=%t landscape=%t nudity_node=%q positive=%q negative=%q", seed, naked, landscape, nudityID, positive, negative)
 
 	// Connect the WebSocket *before* submitting the job so we don't miss
 	// early "executing" / "progress" events. The same client_id ties the

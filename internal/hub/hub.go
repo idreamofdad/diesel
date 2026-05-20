@@ -106,6 +106,12 @@ type Event struct {
 	// use it to decide whether to play the reply's TTS audio locally
 	// (last-active wins: only origin plays).
 	Origin string `json:"origin,omitempty"`
+	// TurnID is the hub's monotonic per-turn counter, set on every
+	// turn-scoped event (started / complete / error, audio, portrait).
+	// It lets a subscriber correlate a later media event back to the
+	// turn that produced it — the Telegram bridge uses it to attach a
+	// portrait to the reply it belongs to.
+	TurnID int64 `json:"turn_id,omitempty"`
 	// User and Assistant carry the messages appended to history.
 	User      *chat.Message `json:"user,omitempty"`
 	Assistant *chat.Message `json:"assistant,omitempty"`
@@ -155,6 +161,14 @@ const mediaCacheSize = 8
 // a full render or two so a slow client can still fetch the most
 // recent frame after a backlog.
 const previewCacheSize = 64
+
+// telegramOriginPrefix marks turns that arrived over the Telegram bridge
+// (origins look like "telegram:<chat_id>"). Those render a landscape
+// portrait — Telegram displays photos wide — while every other origin
+// keeps the workflow's portrait dimensions. Duplicated here as a literal
+// rather than imported from internal/telegram, which imports this
+// package: importing it back would create a cycle.
+const telegramOriginPrefix = "telegram:"
 
 // Hub owns the conversation. Construct with New(), then call Start once
 // at boot to load any persisted history and Stop at shutdown.
@@ -362,6 +376,7 @@ func (h *Hub) Send(ctx context.Context, text, origin string) error {
 	h.broadcast(Event{
 		Type:      EventTurnStarted,
 		Origin:    origin,
+		TurnID:    turnID,
 		User:      &user,
 		Timestamp: time.Now(),
 	})
@@ -412,6 +427,7 @@ func (h *Hub) runTurn(ctx context.Context, s settings.AppSettings, snapshot []ch
 		h.broadcast(Event{
 			Type:      EventTurnError,
 			Origin:    origin,
+			TurnID:    turnID,
 			Error:     err.Error(),
 			Timestamp: time.Now(),
 		})
@@ -419,7 +435,7 @@ func (h *Hub) runTurn(ctx context.Context, s settings.AppSettings, snapshot []ch
 		return
 	}
 
-	assistant := chat.Message{Role: chat.RoleAssistant, Content: reply.Text, Timestamp: time.Now()}
+	assistant := chat.Message{Role: chat.RoleAssistant, Content: reply.Text, Emotion: reply.Emotion, Timestamp: time.Now()}
 	h.mu.Lock()
 	h.history = append(h.history, assistant)
 	hist := append([]chat.Message(nil), h.history...)
@@ -436,6 +452,7 @@ func (h *Hub) runTurn(ctx context.Context, s settings.AppSettings, snapshot []ch
 	h.broadcast(Event{
 		Type:      EventTurnComplete,
 		Origin:    origin,
+		TurnID:    turnID,
 		Assistant: &assistant,
 		Emotion:   reply.Emotion,
 		Naked:     reply.Naked,
@@ -451,7 +468,7 @@ func (h *Hub) runTurn(ctx context.Context, s settings.AppSettings, snapshot []ch
 	// audio for this turn" signal to advance, otherwise they'd wait
 	// forever for a synthesis that's never coming.
 	go h.synthesizeAudio(turnCtx, s, reply, origin, turnID)
-	go h.renderPortrait(turnCtx, s, reply, turnID)
+	go h.renderPortrait(turnCtx, s, reply, origin, turnID)
 }
 
 // synthesizeAudio runs TTS and broadcasts EventAudioReady when done.
@@ -462,6 +479,7 @@ func (h *Hub) synthesizeAudio(ctx context.Context, s settings.AppSettings, reply
 	ev := Event{
 		Type:      EventAudioReady,
 		Origin:    origin,
+		TurnID:    turnID,
 		Timestamp: time.Now(),
 	}
 	defer func() {
@@ -487,9 +505,10 @@ func (h *Hub) synthesizeAudio(ctx context.Context, s settings.AppSettings, reply
 // renderPortrait runs ComfyUI image generation and broadcasts
 // EventPortraitReady when done — same always-broadcast contract as
 // synthesizeAudio. Empty PortraitURL = "no portrait for this turn".
-func (h *Hub) renderPortrait(ctx context.Context, s settings.AppSettings, reply chat.Reply, turnID int64) {
+func (h *Hub) renderPortrait(ctx context.Context, s settings.AppSettings, reply chat.Reply, origin string, turnID int64) {
 	ev := Event{
 		Type:      EventPortraitReady,
+		TurnID:    turnID,
 		Timestamp: time.Now(),
 	}
 	defer func() {
@@ -510,6 +529,7 @@ func (h *Hub) renderPortrait(ctx context.Context, s settings.AppSettings, reply 
 	onProgress := func(p comfyui.Progress) {
 		ev := Event{
 			Type:      EventPortraitProgress,
+			TurnID:    turnID,
 			Timestamp: time.Now(),
 		}
 		if p.Total > 0 {
@@ -528,7 +548,8 @@ func (h *Hub) renderPortrait(ctx context.Context, s settings.AppSettings, reply 
 		}
 		h.broadcast(ev)
 	}
-	png, err := comfyui.Generate(ctx, s, prompt, s.ImageNegativePrompt, reply.Naked, onProgress)
+	landscape := strings.HasPrefix(origin, telegramOriginPrefix)
+	png, err := comfyui.Generate(ctx, s, prompt, s.ImageNegativePrompt, reply.Naked, landscape, onProgress)
 	if err != nil || len(png) == 0 {
 		return
 	}

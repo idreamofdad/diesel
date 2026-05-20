@@ -16,6 +16,7 @@ import (
 	"diesel/internal/server"
 	"diesel/internal/settings"
 	"diesel/internal/sms"
+	"diesel/internal/telegram"
 	"diesel/internal/tracing"
 	"diesel/internal/tts"
 	"diesel/internal/util"
@@ -69,6 +70,12 @@ func main() {
 	smsMgr := sms.New(h)
 	smsMgr.Apply(settings.Load())
 	defer smsMgr.Stop()
+
+	// Telegram bot bridge. Same Apply/Stop shape — opt-in, hot-reapplied
+	// on every Save.
+	tgMgr := telegram.New(h)
+	tgMgr.Apply(settings.Load())
+	defer tgMgr.Stop()
 
 	qt.NewQApplication(os.Args)
 
@@ -579,7 +586,7 @@ func main() {
 	prefsAction := qt.NewQAction2("Settings…")
 	prefsAction.SetMenuRole(qt.QAction__PreferencesRole)
 	prefsAction.OnTriggered(func() {
-		showSettingsDialog(window.QWidget, srvMgr, smsMgr)
+		showSettingsDialog(window.QWidget, srvMgr, smsMgr, tgMgr)
 	})
 	fileMenu.AddAction(prefsAction)
 
@@ -590,6 +597,7 @@ func main() {
 	// no in-flight WS handlers try to use a half-torn-down hub.
 	srvMgr.Stop()
 	smsMgr.Stop()
+	tgMgr.Stop()
 	h.Unsubscribe(desktopOrigin)
 	h.Stop()
 }
@@ -637,7 +645,7 @@ func showPortraitFullSize(parent *qt.QWidget, png []byte) {
 // showSettingsDialog presents a modal settings dialog populated from the
 // on-disk settings file. Save writes them back and applies any server
 // or SMS config changes to the respective managers; Cancel discards.
-func showSettingsDialog(parent *qt.QWidget, srvMgr *server.Manager, smsMgr *sms.Manager) {
+func showSettingsDialog(parent *qt.QWidget, srvMgr *server.Manager, smsMgr *sms.Manager, tgMgr *telegram.Manager) {
 	current := settings.Load()
 
 	dlg := qt.NewQDialog(parent)
@@ -1034,6 +1042,30 @@ func showSettingsDialog(parent *qt.QWidget, srvMgr *server.Manager, smsMgr *sms.
 		smsTestBtn.SetEnabled(true)
 	})
 
+	// ─── Telegram tab ───────────────────────────────────────────────────
+	// getUpdates long-poll bridge — when on, the manager feeds inbound
+	// Telegram DMs into the same hub the desktop uses. Only the single
+	// configured @username gets a reply. The bot token is masked like
+	// the other secret fields. No poll-interval knob: long-poll has none.
+	enableTelegram := qt.NewQCheckBox3("Enable Telegram bot (poll for messages)")
+	enableTelegram.SetChecked(current.EnableTelegram)
+	tgToken := qt.NewQLineEdit3(current.TelegramBotToken)
+	tgToken.SetEchoMode(qt.QLineEdit__Password)
+	tgToken.SetPlaceholderText("123456789:ABC… (from @BotFather)")
+	tgUsername := qt.NewQLineEdit3(current.TelegramAllowedUsername)
+	tgUsername.SetPlaceholderText("@username — the one allowed user")
+	tgStatus := qt.NewQLabel5(tgMgr.Status(), nil)
+	tgStatus.SetWordWrap(true)
+	tgStatus.SetStyleSheet("color: #aaa;")
+	tgTestRow, tgTestBtn, tgTestStatus := makeTestRow("Test connection")
+	tgTestBtn.OnClicked(func() {
+		tgTestBtn.SetEnabled(false)
+		tgTestStatus.SetText("Testing…")
+		qt.QCoreApplication_ProcessEvents()
+		tgTestStatus.SetText(telegram.TestConnection(tgToken.Text()))
+		tgTestBtn.SetEnabled(true)
+	})
+
 	// LLM tab.
 	llmForm, llmTab := newTab()
 	llmForm.AddRow3("API endpoint:", endpoint.QWidget)
@@ -1093,6 +1125,14 @@ func showSettingsDialog(parent *qt.QWidget, srvMgr *server.Manager, smsMgr *sms.
 	smsForm.AddRow3("Status:", smsStatus.QWidget)
 	smsForm.AddRowWithLayout(smsTestRow.QLayout)
 
+	// Telegram tab.
+	tgForm, tgTab := newTab()
+	tgForm.AddRowWithWidget(enableTelegram.QWidget)
+	tgForm.AddRow3("Bot token:", tgToken.QWidget)
+	tgForm.AddRow3("Allowed username:", tgUsername.QWidget)
+	tgForm.AddRow3("Status:", tgStatus.QWidget)
+	tgForm.AddRowWithLayout(tgTestRow.QLayout)
+
 	// Appearance.
 	apForm, apTab := newTab()
 	apForm.AddRow3("Theme:", theme.QWidget)
@@ -1105,6 +1145,7 @@ func showSettingsDialog(parent *qt.QWidget, srvMgr *server.Manager, smsMgr *sms.
 	tabs.AddTab(imgTab, "Image Generation")
 	tabs.AddTab(srvTab, "Server")
 	tabs.AddTab(smsTab, "SMS")
+	tabs.AddTab(tgTab, "Telegram")
 	tabs.AddTab(apTab, "Appearance")
 	root.AddWidget2(tabs.QWidget, 1)
 
@@ -1122,41 +1163,44 @@ func showSettingsDialog(parent *qt.QWidget, srvMgr *server.Manager, smsMgr *sms.
 			}
 		}
 		updated := settings.AppSettings{
-			Theme:                  theme.CurrentText(),
-			APIEndpoint:            endpoint.Text(),
-			APIKey:                 apiKey.Text(),
-			Model:                  model.CurrentText(),
-			SystemPrompt:           systemPrompt.ToPlainText(),
-			HistoryMessages:        historyMessages.Value(),
-			STTEndpoint:            sttEndpoint.Text(),
-			STTAPIKey:              sttAPIKey.Text(),
-			STTModel:               sttModel.CurrentText(),
-			ContinuousConversation: continuousConv.IsChecked(),
-			EnableTTS:              enableTTS.IsChecked(),
-			TTSEndpoint:            ttsEndpoint.Text(),
-			TTSAPIKey:              ttsAPIKey.Text(),
-			TTSModel:               ttsModel.CurrentText(),
-			TTSVoice:               ttsVoice.Text(),
-			InputDevice:            inputDevice.CurrentText(),
-			OutputDevice:           outputDevice.CurrentText(),
-			SaveToDisk:             autoSave.IsChecked(),
-			EnableImageGen:         enableImageGen.IsChecked(),
-			ComfyUIEndpoint:        comfyEndpoint.Text(),
-			ImagePrompt:            imagePromptEdit.ToPlainText(),
-			ImageClothing:          imageClothingEdit.ToPlainText(),
-			ImageNudity:            imageNudityEdit.ToPlainText(),
-			ImageNegativePrompt:    imageNegEdit.ToPlainText(),
-			ImageSteps:             imageSteps.Value(),
-			EnableServer:           enableServer.IsChecked(),
-			ServerExposeNetwork:    serverExpose.IsChecked(),
-			ServerPort:             serverPort.Value(),
-			ServerAuthToken:        serverToken.Text(),
-			EnableSMS:              enableSMS.IsChecked(),
-			TwilioAccountSID:       smsSID.Text(),
-			TwilioAuthToken:        smsToken.Text(),
-			TwilioFromNumber:       smsFrom.Text(),
-			SMSAllowedNumbers:      allowed,
-			SMSPollSeconds:         smsPoll.Value(),
+			Theme:                   theme.CurrentText(),
+			APIEndpoint:             endpoint.Text(),
+			APIKey:                  apiKey.Text(),
+			Model:                   model.CurrentText(),
+			SystemPrompt:            systemPrompt.ToPlainText(),
+			HistoryMessages:         historyMessages.Value(),
+			STTEndpoint:             sttEndpoint.Text(),
+			STTAPIKey:               sttAPIKey.Text(),
+			STTModel:                sttModel.CurrentText(),
+			ContinuousConversation:  continuousConv.IsChecked(),
+			EnableTTS:               enableTTS.IsChecked(),
+			TTSEndpoint:             ttsEndpoint.Text(),
+			TTSAPIKey:               ttsAPIKey.Text(),
+			TTSModel:                ttsModel.CurrentText(),
+			TTSVoice:                ttsVoice.Text(),
+			InputDevice:             inputDevice.CurrentText(),
+			OutputDevice:            outputDevice.CurrentText(),
+			SaveToDisk:              autoSave.IsChecked(),
+			EnableImageGen:          enableImageGen.IsChecked(),
+			ComfyUIEndpoint:         comfyEndpoint.Text(),
+			ImagePrompt:             imagePromptEdit.ToPlainText(),
+			ImageClothing:           imageClothingEdit.ToPlainText(),
+			ImageNudity:             imageNudityEdit.ToPlainText(),
+			ImageNegativePrompt:     imageNegEdit.ToPlainText(),
+			ImageSteps:              imageSteps.Value(),
+			EnableServer:            enableServer.IsChecked(),
+			ServerExposeNetwork:     serverExpose.IsChecked(),
+			ServerPort:              serverPort.Value(),
+			ServerAuthToken:         serverToken.Text(),
+			EnableSMS:               enableSMS.IsChecked(),
+			TwilioAccountSID:        smsSID.Text(),
+			TwilioAuthToken:         smsToken.Text(),
+			TwilioFromNumber:        smsFrom.Text(),
+			SMSAllowedNumbers:       allowed,
+			SMSPollSeconds:          smsPoll.Value(),
+			EnableTelegram:          enableTelegram.IsChecked(),
+			TelegramBotToken:        tgToken.Text(),
+			TelegramAllowedUsername: strings.TrimSpace(tgUsername.Text()),
 		}
 		if err := updated.Save(); err != nil {
 			qt.QMessageBox_Warning(parent, "Settings",
@@ -1167,13 +1211,15 @@ func showSettingsDialog(parent *qt.QWidget, srvMgr *server.Manager, smsMgr *sms.
 		// label updates so the user sees a failed bind without closing
 		// the dialog.
 		serverStatus.SetText(srvMgr.Apply(updated))
-		// Apply the SMS config to its manager too — same shape, same
-		// "keep dialog open on failure" semantics.
+		// Apply the SMS and Telegram configs to their managers too —
+		// same shape, same "keep dialog open on failure" semantics.
 		smsStatus.SetText(smsMgr.Apply(updated))
-		// If either apply failed, give the user a chance to fix it
-		// instead of closing the dialog out from under them.
+		tgStatus.SetText(tgMgr.Apply(updated))
+		// If any apply failed, give the user a chance to fix it instead
+		// of closing the dialog out from under them.
 		if strings.HasPrefix(serverStatus.Text(), "✗") ||
-			strings.HasPrefix(smsStatus.Text(), "✗") {
+			strings.HasPrefix(smsStatus.Text(), "✗") ||
+			strings.HasPrefix(tgStatus.Text(), "✗") {
 			return
 		}
 		dlg.Accept()

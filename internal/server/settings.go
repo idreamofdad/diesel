@@ -39,6 +39,9 @@ func maskSettings(s settings.AppSettings) settings.AppSettings {
 	if s.TwilioAuthToken != "" {
 		s.TwilioAuthToken = secretMask
 	}
+	if s.TelegramBotToken != "" {
+		s.TelegramBotToken = secretMask
+	}
 	return s
 }
 
@@ -66,6 +69,11 @@ func mergeFromWeb(current, incoming settings.AppSettings) settings.AppSettings {
 	incoming.TwilioFromNumber = current.TwilioFromNumber
 	incoming.SMSAllowedNumbers = current.SMSAllowedNumbers
 	incoming.SMSPollSeconds = current.SMSPollSeconds
+	// Telegram is the same shape — the bot token is host-bound, not
+	// something a remote browser should retune. Preserve verbatim.
+	incoming.EnableTelegram = current.EnableTelegram
+	incoming.TelegramBotToken = current.TelegramBotToken
+	incoming.TelegramAllowedUsername = current.TelegramAllowedUsername
 
 	if incoming.APIKey == secretMask {
 		incoming.APIKey = current.APIKey

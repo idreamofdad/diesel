@@ -275,6 +275,81 @@ func TestCompletion_HistoryAssembly(t *testing.T) {
 	}
 }
 
+func TestCompletion_LastEmotionSystemMessage(t *testing.T) {
+	t.Run("prior assistant emotion is fed back as a system message", func(t *testing.T) {
+		srv, req := stubChatServer(t, 200, jsonChoice(`{"text":"ok","emotion":"neutral"}`, Usage{}))
+		_, _, err := Completion(context.Background(),
+			settings.AppSettings{APIEndpoint: srv.URL, Model: "m", HistoryMessages: 99},
+			[]Message{
+				{Role: RoleUser, Content: "u1"},
+				{Role: RoleAssistant, Content: "a1", Emotion: "amused"},
+				{Role: RoleUser, Content: "u2"},
+			},
+		)
+		require.NoError(t, err)
+		var found bool
+		for _, m := range req.Messages {
+			if m.Role == RoleSystem && strings.Contains(m.Content, "amused") {
+				found = true
+			}
+		}
+		assert.True(t, found, "expected a system message naming the last emotion")
+	})
+
+	t.Run("most recent assistant emotion wins", func(t *testing.T) {
+		srv, req := stubChatServer(t, 200, jsonChoice(`{"text":"ok","emotion":"neutral"}`, Usage{}))
+		_, _, err := Completion(context.Background(),
+			settings.AppSettings{APIEndpoint: srv.URL, Model: "m", HistoryMessages: 99},
+			[]Message{
+				{Role: RoleAssistant, Content: "a1", Emotion: "happy"},
+				{Role: RoleUser, Content: "u1"},
+				{Role: RoleAssistant, Content: "a2", Emotion: "annoyed"},
+				{Role: RoleUser, Content: "u2"},
+			},
+		)
+		require.NoError(t, err)
+		var emotionMsgs []string
+		for _, m := range req.Messages {
+			if m.Role == RoleSystem && strings.Contains(m.Content, "facial expression") {
+				emotionMsgs = append(emotionMsgs, m.Content)
+			}
+		}
+		require.Len(t, emotionMsgs, 1)
+		assert.Contains(t, emotionMsgs[0], "annoyed")
+		assert.NotContains(t, emotionMsgs[0], "happy")
+	})
+
+	t.Run("no assistant turn yet means no emotion system message", func(t *testing.T) {
+		srv, req := stubChatServer(t, 200, jsonChoice(`{"text":"ok","emotion":"neutral"}`, Usage{}))
+		_, _, err := Completion(context.Background(),
+			settings.AppSettings{APIEndpoint: srv.URL, Model: "m"},
+			[]Message{{Role: RoleUser, Content: "hi"}},
+		)
+		require.NoError(t, err)
+		for _, m := range req.Messages {
+			assert.NotContains(t, m.Content, "facial expression")
+		}
+	})
+
+	t.Run("emotion is stripped from the assistant turn on the wire", func(t *testing.T) {
+		srv, req := stubChatServer(t, 200, jsonChoice(`{"text":"ok","emotion":"neutral"}`, Usage{}))
+		_, _, err := Completion(context.Background(),
+			settings.AppSettings{APIEndpoint: srv.URL, Model: "m", HistoryMessages: 99},
+			[]Message{
+				{Role: RoleUser, Content: "u1"},
+				{Role: RoleAssistant, Content: "a1", Emotion: "amused"},
+				{Role: RoleUser, Content: "u2"},
+			},
+		)
+		require.NoError(t, err)
+		for _, m := range req.Messages {
+			if m.Role == RoleAssistant {
+				assert.Empty(t, m.Emotion, "emotion must not ride on the wire assistant turn")
+			}
+		}
+	})
+}
+
 func TestCompletion_AuthHeader(t *testing.T) {
 	cases := []struct {
 		name       string
