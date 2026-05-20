@@ -85,7 +85,7 @@ type Manager struct {
 type config struct {
 	enabled bool
 	token   string
-	allowed []string // normalized: lower-cased, leading '@' stripped
+	allowed string // the one permitted username, normalized (lower-case, no '@')
 }
 
 // pending is one queued inbound message waiting for a free hub slot.
@@ -103,34 +103,19 @@ type turnRef struct {
 }
 
 // configFor extracts the Telegram-relevant fields and normalizes the
-// allow-list.
+// permitted username.
 func configFor(s settings.AppSettings) config {
-	allowed := make([]string, 0, len(s.TelegramAllowedUsernames))
-	for _, u := range s.TelegramAllowedUsernames {
-		if v := normalizeUsername(u); v != "" {
-			allowed = append(allowed, v)
-		}
-	}
 	return config{
 		enabled: s.EnableTelegram,
 		token:   strings.TrimSpace(s.TelegramBotToken),
-		allowed: allowed,
+		allowed: normalizeUsername(s.TelegramAllowedUsername),
 	}
 }
 
 // equal is a structural compare used by Apply to short-circuit a no-op
-// re-apply. allowed is a slice so we have to walk it.
+// re-apply.
 func (c config) equal(o config) bool {
-	if c.enabled != o.enabled || c.token != o.token ||
-		len(c.allowed) != len(o.allowed) {
-		return false
-	}
-	for i := range c.allowed {
-		if c.allowed[i] != o.allowed[i] {
-			return false
-		}
-	}
-	return true
+	return c.enabled == o.enabled && c.token == o.token && c.allowed == o.allowed
 }
 
 // validate returns an error naming the missing field so the Settings
@@ -139,27 +124,19 @@ func (c config) validate() error {
 	switch {
 	case c.token == "":
 		return errors.New("Bot Token is empty")
-	case len(c.allowed) == 0:
-		return errors.New("no allowed usernames configured")
+	case c.allowed == "":
+		return errors.New("no allowed username configured")
 	}
 	return nil
 }
 
-// isAllowed reports whether `username` is on the allow-list. Telegram
-// usernames are case-insensitive, so both sides are normalized. An empty
-// username (the sender never set one) can never match — those messages
-// are dropped.
+// isAllowed reports whether `username` is the one permitted user.
+// Telegram usernames are case-insensitive, so both sides are normalized.
+// An empty username (the sender never set one) can never match — those
+// messages are dropped.
 func (c config) isAllowed(username string) bool {
 	want := normalizeUsername(username)
-	if want == "" {
-		return false
-	}
-	for _, a := range c.allowed {
-		if a == want {
-			return true
-		}
-	}
-	return false
+	return want != "" && want == c.allowed
 }
 
 // normalizeUsername strips a leading '@' and lower-cases so a username

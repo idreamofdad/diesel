@@ -158,13 +158,13 @@ type AppSettings struct {
 	// fresh install with no bot stays inert. TelegramBotToken is the
 	// token @BotFather hands out — it identifies the bot, the same way
 	// the Twilio SID/token pair identifies the SMS account. Inbound is
-	// getUpdates long-poll, so there's no poll-interval knob. Only DMs
-	// from a sender whose @username is in TelegramAllowedUsernames get a
-	// reply; anyone else is silently dropped so a stranger who finds the
-	// bot can't run up the LLM bill.
-	EnableTelegram           bool     `json:"enable_telegram"`
-	TelegramBotToken         string   `json:"telegram_bot_token"`
-	TelegramAllowedUsernames []string `json:"telegram_allowed_usernames"`
+	// getUpdates long-poll, so there's no poll-interval knob. The bridge
+	// serves a single user: only DMs from TelegramAllowedUsername get a
+	// reply, everyone else is silently dropped so a stranger who finds
+	// the bot can't run up the LLM bill.
+	EnableTelegram          bool   `json:"enable_telegram"`
+	TelegramBotToken        string `json:"telegram_bot_token"`
+	TelegramAllowedUsername string `json:"telegram_allowed_username"`
 }
 
 // Default returns the starting values used when no settings file exists

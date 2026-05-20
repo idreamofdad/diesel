@@ -73,7 +73,7 @@ func mergeFromWeb(current, incoming settings.AppSettings) settings.AppSettings {
 	// something a remote browser should retune. Preserve verbatim.
 	incoming.EnableTelegram = current.EnableTelegram
 	incoming.TelegramBotToken = current.TelegramBotToken
-	incoming.TelegramAllowedUsernames = current.TelegramAllowedUsernames
+	incoming.TelegramAllowedUsername = current.TelegramAllowedUsername
 
 	if incoming.APIKey == secretMask {
 		incoming.APIKey = current.APIKey
