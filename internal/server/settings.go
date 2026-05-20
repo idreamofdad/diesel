@@ -36,6 +36,9 @@ func maskSettings(s settings.AppSettings) settings.AppSettings {
 	if s.ServerAuthToken != "" {
 		s.ServerAuthToken = secretMask
 	}
+	if s.TwilioAuthToken != "" {
+		s.TwilioAuthToken = secretMask
+	}
 	return s
 }
 
@@ -54,6 +57,15 @@ func mergeFromWeb(current, incoming settings.AppSettings) settings.AppSettings {
 	incoming.ServerAuthToken = current.ServerAuthToken
 	incoming.InputDevice = current.InputDevice
 	incoming.OutputDevice = current.OutputDevice
+	// SMS/Twilio config lives on the host — credentials are bound to a
+	// physical account/number, not something the remote browser should
+	// be allowed to retune. Preserve verbatim from the on-disk copy.
+	incoming.EnableSMS = current.EnableSMS
+	incoming.TwilioAccountSID = current.TwilioAccountSID
+	incoming.TwilioAuthToken = current.TwilioAuthToken
+	incoming.TwilioFromNumber = current.TwilioFromNumber
+	incoming.SMSAllowedNumbers = current.SMSAllowedNumbers
+	incoming.SMSPollSeconds = current.SMSPollSeconds
 
 	if incoming.APIKey == secretMask {
 		incoming.APIKey = current.APIKey

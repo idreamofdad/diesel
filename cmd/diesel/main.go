@@ -15,6 +15,7 @@ import (
 	"diesel/internal/hub"
 	"diesel/internal/server"
 	"diesel/internal/settings"
+	"diesel/internal/sms"
 	"diesel/internal/tracing"
 	"diesel/internal/tts"
 	"diesel/internal/util"
@@ -62,6 +63,12 @@ func main() {
 	srvMgr := server.New(h, embeddedWebFS())
 	srvMgr.Apply(settings.Load())
 	defer srvMgr.Stop()
+
+	// SMS bridge over Twilio. Same Apply/Stop shape as the HTTP server
+	// — opt-in via settings, hot-reapplied on every Save.
+	smsMgr := sms.New(h)
+	smsMgr.Apply(settings.Load())
+	defer smsMgr.Stop()
 
 	qt.NewQApplication(os.Args)
 
@@ -572,7 +579,7 @@ func main() {
 	prefsAction := qt.NewQAction2("Settings…")
 	prefsAction.SetMenuRole(qt.QAction__PreferencesRole)
 	prefsAction.OnTriggered(func() {
-		showSettingsDialog(window.QWidget, srvMgr)
+		showSettingsDialog(window.QWidget, srvMgr, smsMgr)
 	})
 	fileMenu.AddAction(prefsAction)
 
@@ -582,6 +589,7 @@ func main() {
 	// Tear down the hub subscription on quit. Stop the server first so
 	// no in-flight WS handlers try to use a half-torn-down hub.
 	srvMgr.Stop()
+	smsMgr.Stop()
 	h.Unsubscribe(desktopOrigin)
 	h.Stop()
 }
@@ -628,8 +636,8 @@ func showPortraitFullSize(parent *qt.QWidget, png []byte) {
 
 // showSettingsDialog presents a modal settings dialog populated from the
 // on-disk settings file. Save writes them back and applies any server
-// config changes to srvMgr; Cancel discards.
-func showSettingsDialog(parent *qt.QWidget, srvMgr *server.Manager) {
+// or SMS config changes to the respective managers; Cancel discards.
+func showSettingsDialog(parent *qt.QWidget, srvMgr *server.Manager, smsMgr *sms.Manager) {
 	current := settings.Load()
 
 	dlg := qt.NewQDialog(parent)
@@ -976,6 +984,56 @@ func showSettingsDialog(parent *qt.QWidget, srvMgr *server.Manager) {
 	serverStatus.SetWordWrap(true)
 	serverStatus.SetStyleSheet("color: #aaa;")
 
+	// ─── SMS tab ────────────────────────────────────────────────────────
+	// Polled Twilio bridge — when on, the manager hits Twilio every
+	// SMSPollSeconds and feeds inbound messages into the same hub the
+	// desktop uses. Outbound replies are addressed to whichever number
+	// most recently texted in. Auth Token is masked like the other
+	// secret fields.
+	enableSMS := qt.NewQCheckBox3("Enable SMS over Twilio (poll for messages)")
+	enableSMS.SetChecked(current.EnableSMS)
+	smsSID := qt.NewQLineEdit3(current.TwilioAccountSID)
+	smsSID.SetPlaceholderText("ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+	smsToken := qt.NewQLineEdit3(current.TwilioAuthToken)
+	smsToken.SetEchoMode(qt.QLineEdit__Password)
+	smsToken.SetPlaceholderText("(your Twilio Auth Token)")
+	smsFrom := qt.NewQLineEdit3(current.TwilioFromNumber)
+	smsFrom.SetPlaceholderText("+15551234567")
+	smsAllowed := qt.NewQTextEdit(nil)
+	smsAllowed.SetPlaceholderText("One number per line, e.g. +15551234567")
+	smsAllowed.SetPlainText(strings.Join(current.SMSAllowedNumbers, "\n"))
+	smsAllowed.SetMinimumHeight(96)
+	smsPoll := qt.NewQSpinBox(nil)
+	smsPoll.SetRange(3, 600)
+	smsPoll.SetSingleStep(1)
+	smsPoll.SetSuffix(" s")
+	if current.SMSPollSeconds > 0 {
+		smsPoll.SetValue(current.SMSPollSeconds)
+	} else {
+		smsPoll.SetValue(10)
+	}
+	smsStatus := qt.NewQLabel5(smsMgr.Status(), nil)
+	smsStatus.SetWordWrap(true)
+	smsStatus.SetStyleSheet("color: #aaa;")
+	smsTestRow, smsTestBtn, smsTestStatus := makeTestRow("Test connection")
+	smsTestBtn.OnClicked(func() {
+		smsTestBtn.SetEnabled(false)
+		smsTestStatus.SetText("Testing…")
+		qt.QCoreApplication_ProcessEvents()
+		c := &sms.Client{
+			AccountSID: smsSID.Text(),
+			AuthToken:  smsToken.Text(),
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		defer cancel()
+		if err := c.Ping(ctx); err != nil {
+			smsTestStatus.SetText("✗ " + err.Error())
+		} else {
+			smsTestStatus.SetText("✓ Connected to Twilio.")
+		}
+		smsTestBtn.SetEnabled(true)
+	})
+
 	// LLM tab.
 	llmForm, llmTab := newTab()
 	llmForm.AddRow3("API endpoint:", endpoint.QWidget)
@@ -1024,6 +1082,17 @@ func showSettingsDialog(parent *qt.QWidget, srvMgr *server.Manager) {
 	srvForm.AddRow3("Auth token:", serverToken.QWidget)
 	srvForm.AddRow3("Status:", serverStatus.QWidget)
 
+	// SMS tab.
+	smsForm, smsTab := newTab()
+	smsForm.AddRowWithWidget(enableSMS.QWidget)
+	smsForm.AddRow3("Account SID:", smsSID.QWidget)
+	smsForm.AddRow3("Auth Token:", smsToken.QWidget)
+	smsForm.AddRow3("From number:", smsFrom.QWidget)
+	smsForm.AddRow3("Allowed numbers:", smsAllowed.QWidget)
+	smsForm.AddRow3("Poll interval:", smsPoll.QWidget)
+	smsForm.AddRow3("Status:", smsStatus.QWidget)
+	smsForm.AddRowWithLayout(smsTestRow.QLayout)
+
 	// Appearance.
 	apForm, apTab := newTab()
 	apForm.AddRow3("Theme:", theme.QWidget)
@@ -1035,6 +1104,7 @@ func showSettingsDialog(parent *qt.QWidget, srvMgr *server.Manager) {
 	tabs.AddTab(ttsTab, "Text-to-Speech")
 	tabs.AddTab(imgTab, "Image Generation")
 	tabs.AddTab(srvTab, "Server")
+	tabs.AddTab(smsTab, "SMS")
 	tabs.AddTab(apTab, "Appearance")
 	root.AddWidget2(tabs.QWidget, 1)
 
@@ -1042,6 +1112,15 @@ func showSettingsDialog(parent *qt.QWidget, srvMgr *server.Manager) {
 		qt.QDialogButtonBox__Save | qt.QDialogButtonBox__Cancel,
 	)
 	buttons.OnAccepted(func() {
+		// Split the allowed-numbers textarea into a clean []string —
+		// trim each line and drop blanks so a trailing newline doesn't
+		// turn into an empty entry the manager would have to filter.
+		var allowed []string
+		for _, line := range strings.Split(smsAllowed.ToPlainText(), "\n") {
+			if v := strings.TrimSpace(line); v != "" {
+				allowed = append(allowed, v)
+			}
+		}
 		updated := settings.AppSettings{
 			Theme:                  theme.CurrentText(),
 			APIEndpoint:            endpoint.Text(),
@@ -1072,6 +1151,12 @@ func showSettingsDialog(parent *qt.QWidget, srvMgr *server.Manager) {
 			ServerExposeNetwork:    serverExpose.IsChecked(),
 			ServerPort:             serverPort.Value(),
 			ServerAuthToken:        serverToken.Text(),
+			EnableSMS:              enableSMS.IsChecked(),
+			TwilioAccountSID:       smsSID.Text(),
+			TwilioAuthToken:        smsToken.Text(),
+			TwilioFromNumber:       smsFrom.Text(),
+			SMSAllowedNumbers:      allowed,
+			SMSPollSeconds:         smsPoll.Value(),
 		}
 		if err := updated.Save(); err != nil {
 			qt.QMessageBox_Warning(parent, "Settings",
@@ -1082,9 +1167,13 @@ func showSettingsDialog(parent *qt.QWidget, srvMgr *server.Manager) {
 		// label updates so the user sees a failed bind without closing
 		// the dialog.
 		serverStatus.SetText(srvMgr.Apply(updated))
-		// If the apply failed, give the user a chance to fix it instead
-		// of closing the dialog out from under them.
-		if strings.HasPrefix(serverStatus.Text(), "✗") {
+		// Apply the SMS config to its manager too — same shape, same
+		// "keep dialog open on failure" semantics.
+		smsStatus.SetText(smsMgr.Apply(updated))
+		// If either apply failed, give the user a chance to fix it
+		// instead of closing the dialog out from under them.
+		if strings.HasPrefix(serverStatus.Text(), "✗") ||
+			strings.HasPrefix(smsStatus.Text(), "✗") {
 			return
 		}
 		dlg.Accept()
