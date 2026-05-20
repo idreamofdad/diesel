@@ -106,6 +106,12 @@ type Event struct {
 	// use it to decide whether to play the reply's TTS audio locally
 	// (last-active wins: only origin plays).
 	Origin string `json:"origin,omitempty"`
+	// TurnID is the hub's monotonic per-turn counter, set on every
+	// turn-scoped event (started / complete / error, audio, portrait).
+	// It lets a subscriber correlate a later media event back to the
+	// turn that produced it — the Telegram bridge uses it to attach a
+	// portrait to the reply it belongs to.
+	TurnID int64 `json:"turn_id,omitempty"`
 	// User and Assistant carry the messages appended to history.
 	User      *chat.Message `json:"user,omitempty"`
 	Assistant *chat.Message `json:"assistant,omitempty"`
@@ -362,6 +368,7 @@ func (h *Hub) Send(ctx context.Context, text, origin string) error {
 	h.broadcast(Event{
 		Type:      EventTurnStarted,
 		Origin:    origin,
+		TurnID:    turnID,
 		User:      &user,
 		Timestamp: time.Now(),
 	})
@@ -412,6 +419,7 @@ func (h *Hub) runTurn(ctx context.Context, s settings.AppSettings, snapshot []ch
 		h.broadcast(Event{
 			Type:      EventTurnError,
 			Origin:    origin,
+			TurnID:    turnID,
 			Error:     err.Error(),
 			Timestamp: time.Now(),
 		})
@@ -436,6 +444,7 @@ func (h *Hub) runTurn(ctx context.Context, s settings.AppSettings, snapshot []ch
 	h.broadcast(Event{
 		Type:      EventTurnComplete,
 		Origin:    origin,
+		TurnID:    turnID,
 		Assistant: &assistant,
 		Emotion:   reply.Emotion,
 		Naked:     reply.Naked,
@@ -462,6 +471,7 @@ func (h *Hub) synthesizeAudio(ctx context.Context, s settings.AppSettings, reply
 	ev := Event{
 		Type:      EventAudioReady,
 		Origin:    origin,
+		TurnID:    turnID,
 		Timestamp: time.Now(),
 	}
 	defer func() {
@@ -490,6 +500,7 @@ func (h *Hub) synthesizeAudio(ctx context.Context, s settings.AppSettings, reply
 func (h *Hub) renderPortrait(ctx context.Context, s settings.AppSettings, reply chat.Reply, turnID int64) {
 	ev := Event{
 		Type:      EventPortraitReady,
+		TurnID:    turnID,
 		Timestamp: time.Now(),
 	}
 	defer func() {
@@ -510,6 +521,7 @@ func (h *Hub) renderPortrait(ctx context.Context, s settings.AppSettings, reply 
 	onProgress := func(p comfyui.Progress) {
 		ev := Event{
 			Type:      EventPortraitProgress,
+			TurnID:    turnID,
 			Timestamp: time.Now(),
 		}
 		if p.Total > 0 {

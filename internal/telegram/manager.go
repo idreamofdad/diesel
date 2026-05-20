@@ -94,6 +94,14 @@ type pending struct {
 	text   string
 }
 
+// turnRef remembers where a Telegram-originated turn's reply landed so
+// the portrait that turn produces later can be sent into the right chat
+// as a reply to the right message. Keyed by hub turn ID.
+type turnRef struct {
+	chatID    int64
+	textMsgID int
+}
+
 // configFor extracts the Telegram-relevant fields and normalizes the
 // allow-list.
 func configFor(s settings.AppSettings) config {
@@ -379,6 +387,15 @@ func (m *Manager) dispatchLoop(ctx context.Context, sub *hub.Subscriber, bot *tg
 
 	var queue []pending
 	var typingCancel context.CancelFunc
+	// awaitingPortrait maps a hub turn ID to where that turn's reply
+	// landed, populated when a Telegram turn completes and consumed when
+	// its portrait_ready arrives. lastPortrait holds the message ID of
+	// the portrait photo currently shown in each chat, so it can be
+	// deleted when the next turn replaces (or clears) it. Both are
+	// in-memory — a restart orphans any portrait already in a chat, the
+	// same tradeoff the queue makes.
+	awaitingPortrait := map[int64]turnRef{}
+	lastPortrait := map[int64]int{}
 	stopTyping := func() {
 		if typingCancel != nil {
 			typingCancel()
@@ -442,11 +459,44 @@ func (m *Manager) dispatchLoop(ctx context.Context, sub *hub.Subscriber, bot *tg
 			case hub.EventTurnComplete:
 				if mine {
 					stopTyping()
+					var textMsgID int
 					if ev.Assistant != nil {
-						m.send(bot, chatID, ev.Assistant.Content)
+						textMsgID = m.send(bot, chatID, ev.Assistant.Content)
 					}
+					// Remember the turn so its portrait — which arrives
+					// later on portrait_ready — can be attached to this
+					// reply. Every turn emits exactly one portrait_ready
+					// (empty URL when image gen is off), so this entry is
+					// always consumed; it never leaks.
+					awaitingPortrait[ev.TurnID] = turnRef{chatID: chatID, textMsgID: textMsgID}
 				}
 				drain()
+			case hub.EventPortraitReady:
+				// portrait_ready carries no origin, so we match it to a
+				// Telegram turn by TurnID. A miss means the turn belonged
+				// to the desktop/web/SMS — not ours to handle.
+				ref, ok := awaitingPortrait[ev.TurnID]
+				if !ok {
+					break
+				}
+				delete(awaitingPortrait, ev.TurnID)
+				if ev.PortraitURL != "" {
+					newID, sent := m.sendPortrait(bot, ref, ev.PortraitURL)
+					if !sent {
+						// Send failed — keep the old portrait rather than
+						// leave the chat with nothing.
+						break
+					}
+					// Send-then-delete: the replacement is up before the
+					// stale one comes down, so the chat never flickers
+					// empty.
+					m.deletePortrait(bot, lastPortrait, ref.chatID)
+					lastPortrait[ref.chatID] = newID
+					break
+				}
+				// Image gen off or the render failed — no replacement is
+				// coming, so drop the now-stale portrait outright.
+				m.deletePortrait(bot, lastPortrait, ref.chatID)
 			case hub.EventTurnError:
 				if mine {
 					stopTyping()
@@ -554,21 +604,70 @@ func TestConnection(token string) string {
 }
 
 // send posts text back to a Telegram chat, splitting on the Bot API's
-// 4096-code-point ceiling. Failures are logged and surfaced to both the
-// dialog status row and the hub status bar, since the Settings dialog is
+// 4096-code-point ceiling. It returns the message ID of the first chunk
+// (0 if nothing was sent) so the caller can anchor a follow-up portrait
+// as a reply to it. Failures are logged and surfaced to both the dialog
+// status row and the hub status bar, since the Settings dialog is
 // usually closed when a send fails.
-func (m *Manager) send(bot *tgbotapi.BotAPI, chatID int64, text string) {
+func (m *Manager) send(bot *tgbotapi.BotAPI, chatID int64, text string) int {
 	text = strings.TrimSpace(text)
 	if text == "" {
-		return
+		return 0
 	}
+	var firstID int
 	for _, chunk := range splitMessage(text) {
-		if _, err := bot.Send(tgbotapi.NewMessage(chatID, chunk)); err != nil {
+		msg, err := bot.Send(tgbotapi.NewMessage(chatID, chunk))
+		if err != nil {
 			log.Printf("[telegram] send to chat %d: %v", chatID, err)
 			m.setStatus("✗ Telegram send: " + err.Error())
 			m.hub.SetStatus(fmt.Sprintf("✗ Telegram send to chat %d failed: %s", chatID, err))
-			return
+			return firstID
 		}
+		if firstID == 0 {
+			firstID = msg.MessageID
+		}
+	}
+	return firstID
+}
+
+// sendPortrait uploads the rendered portrait for a turn as its own photo
+// message, anchored as a reply to that turn's text reply. The bytes come
+// straight from the hub's cache — no HTTP round-trip. Returns the new
+// photo's message ID so the caller can delete it when the next portrait
+// replaces it.
+func (m *Manager) sendPortrait(bot *tgbotapi.BotAPI, ref turnRef, portraitURL string) (int, bool) {
+	id := strings.TrimPrefix(portraitURL, "/api/portrait/")
+	data, ok := m.hub.Portrait(id)
+	if !ok || len(data) == 0 {
+		// The cache is small (8 entries); a slow turn could see its
+		// portrait evicted before this fires. Rare — just skip it.
+		log.Printf("[telegram] portrait %q not in hub cache", id)
+		return 0, false
+	}
+	photo := tgbotapi.NewPhoto(ref.chatID, tgbotapi.FileBytes{Name: "portrait.png", Bytes: data})
+	// 0 = no reply anchor, which Telegram accepts — happens only when the
+	// reply itself had no text.
+	photo.ReplyToMessageID = ref.textMsgID
+	msg, err := bot.Send(photo)
+	if err != nil {
+		log.Printf("[telegram] send portrait to chat %d: %v", ref.chatID, err)
+		m.setStatus("✗ Telegram portrait: " + err.Error())
+		return 0, false
+	}
+	return msg.MessageID, true
+}
+
+// deletePortrait removes the portrait photo currently tracked for chatID,
+// if any, and forgets it. Best-effort: a message older than Telegram's
+// 48 h deletion window (or already gone) draws an error we just log.
+func (m *Manager) deletePortrait(bot *tgbotapi.BotAPI, lastPortrait map[int64]int, chatID int64) {
+	msgID, ok := lastPortrait[chatID]
+	if !ok {
+		return
+	}
+	delete(lastPortrait, chatID)
+	if _, err := bot.Request(tgbotapi.NewDeleteMessage(chatID, msgID)); err != nil {
+		log.Printf("[telegram] delete portrait %d in chat %d: %v", msgID, chatID, err)
 	}
 }
 
