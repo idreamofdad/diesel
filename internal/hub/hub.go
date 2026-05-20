@@ -162,6 +162,14 @@ const mediaCacheSize = 8
 // recent frame after a backlog.
 const previewCacheSize = 64
 
+// telegramOriginPrefix marks turns that arrived over the Telegram bridge
+// (origins look like "telegram:<chat_id>"). Those render a landscape
+// portrait — Telegram displays photos wide — while every other origin
+// keeps the workflow's portrait dimensions. Duplicated here as a literal
+// rather than imported from internal/telegram, which imports this
+// package: importing it back would create a cycle.
+const telegramOriginPrefix = "telegram:"
+
 // Hub owns the conversation. Construct with New(), then call Start once
 // at boot to load any persisted history and Stop at shutdown.
 type Hub struct {
@@ -460,7 +468,7 @@ func (h *Hub) runTurn(ctx context.Context, s settings.AppSettings, snapshot []ch
 	// audio for this turn" signal to advance, otherwise they'd wait
 	// forever for a synthesis that's never coming.
 	go h.synthesizeAudio(turnCtx, s, reply, origin, turnID)
-	go h.renderPortrait(turnCtx, s, reply, turnID)
+	go h.renderPortrait(turnCtx, s, reply, origin, turnID)
 }
 
 // synthesizeAudio runs TTS and broadcasts EventAudioReady when done.
@@ -497,7 +505,7 @@ func (h *Hub) synthesizeAudio(ctx context.Context, s settings.AppSettings, reply
 // renderPortrait runs ComfyUI image generation and broadcasts
 // EventPortraitReady when done — same always-broadcast contract as
 // synthesizeAudio. Empty PortraitURL = "no portrait for this turn".
-func (h *Hub) renderPortrait(ctx context.Context, s settings.AppSettings, reply chat.Reply, turnID int64) {
+func (h *Hub) renderPortrait(ctx context.Context, s settings.AppSettings, reply chat.Reply, origin string, turnID int64) {
 	ev := Event{
 		Type:      EventPortraitReady,
 		TurnID:    turnID,
@@ -540,7 +548,8 @@ func (h *Hub) renderPortrait(ctx context.Context, s settings.AppSettings, reply 
 		}
 		h.broadcast(ev)
 	}
-	png, err := comfyui.Generate(ctx, s, prompt, s.ImageNegativePrompt, reply.Naked, onProgress)
+	landscape := strings.HasPrefix(origin, telegramOriginPrefix)
+	png, err := comfyui.Generate(ctx, s, prompt, s.ImageNegativePrompt, reply.Naked, landscape, onProgress)
 	if err != nil || len(png) == 0 {
 		return
 	}
