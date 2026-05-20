@@ -1044,18 +1044,16 @@ func showSettingsDialog(parent *qt.QWidget, srvMgr *server.Manager, smsMgr *sms.
 
 	// ─── Telegram tab ───────────────────────────────────────────────────
 	// getUpdates long-poll bridge — when on, the manager feeds inbound
-	// Telegram DMs into the same hub the desktop uses. Only senders whose
-	// @username is listed get a reply. The bot token is masked like the
-	// other secret fields. No poll-interval knob: long-poll has none.
+	// Telegram DMs into the same hub the desktop uses. Only the single
+	// configured @username gets a reply. The bot token is masked like
+	// the other secret fields. No poll-interval knob: long-poll has none.
 	enableTelegram := qt.NewQCheckBox3("Enable Telegram bot (poll for messages)")
 	enableTelegram.SetChecked(current.EnableTelegram)
 	tgToken := qt.NewQLineEdit3(current.TelegramBotToken)
 	tgToken.SetEchoMode(qt.QLineEdit__Password)
 	tgToken.SetPlaceholderText("123456789:ABC… (from @BotFather)")
-	tgAllowed := qt.NewQTextEdit(nil)
-	tgAllowed.SetPlaceholderText("One @username per line, e.g. @alice")
-	tgAllowed.SetPlainText(strings.Join(current.TelegramAllowedUsernames, "\n"))
-	tgAllowed.SetMinimumHeight(96)
+	tgUsername := qt.NewQLineEdit3(current.TelegramAllowedUsername)
+	tgUsername.SetPlaceholderText("@username — the one allowed user")
 	tgStatus := qt.NewQLabel5(tgMgr.Status(), nil)
 	tgStatus.SetWordWrap(true)
 	tgStatus.SetStyleSheet("color: #aaa;")
@@ -1131,7 +1129,7 @@ func showSettingsDialog(parent *qt.QWidget, srvMgr *server.Manager, smsMgr *sms.
 	tgForm, tgTab := newTab()
 	tgForm.AddRowWithWidget(enableTelegram.QWidget)
 	tgForm.AddRow3("Bot token:", tgToken.QWidget)
-	tgForm.AddRow3("Allowed usernames:", tgAllowed.QWidget)
+	tgForm.AddRow3("Allowed username:", tgUsername.QWidget)
 	tgForm.AddRow3("Status:", tgStatus.QWidget)
 	tgForm.AddRowWithLayout(tgTestRow.QLayout)
 
@@ -1164,52 +1162,45 @@ func showSettingsDialog(parent *qt.QWidget, srvMgr *server.Manager, smsMgr *sms.
 				allowed = append(allowed, v)
 			}
 		}
-		// Same line-split for the Telegram allow-list textarea.
-		var tgAllowedList []string
-		for _, line := range strings.Split(tgAllowed.ToPlainText(), "\n") {
-			if v := strings.TrimSpace(line); v != "" {
-				tgAllowedList = append(tgAllowedList, v)
-			}
-		}
 		updated := settings.AppSettings{
-			Theme:                    theme.CurrentText(),
-			APIEndpoint:              endpoint.Text(),
-			APIKey:                   apiKey.Text(),
-			Model:                    model.CurrentText(),
-			SystemPrompt:             systemPrompt.ToPlainText(),
-			HistoryMessages:          historyMessages.Value(),
-			STTEndpoint:              sttEndpoint.Text(),
-			STTAPIKey:                sttAPIKey.Text(),
-			STTModel:                 sttModel.CurrentText(),
-			ContinuousConversation:   continuousConv.IsChecked(),
-			EnableTTS:                enableTTS.IsChecked(),
-			TTSEndpoint:              ttsEndpoint.Text(),
-			TTSAPIKey:                ttsAPIKey.Text(),
-			TTSModel:                 ttsModel.CurrentText(),
-			TTSVoice:                 ttsVoice.Text(),
-			InputDevice:              inputDevice.CurrentText(),
-			OutputDevice:             outputDevice.CurrentText(),
-			SaveToDisk:               autoSave.IsChecked(),
-			EnableImageGen:           enableImageGen.IsChecked(),
-			ComfyUIEndpoint:          comfyEndpoint.Text(),
-			ImagePrompt:              imagePromptEdit.ToPlainText(),
-			ImageClothing:            imageClothingEdit.ToPlainText(),
-			ImageNudity:              imageNudityEdit.ToPlainText(),
-			ImageNegativePrompt:      imageNegEdit.ToPlainText(),
-			ImageSteps:               imageSteps.Value(),
-			EnableServer:             enableServer.IsChecked(),
-			ServerExposeNetwork:      serverExpose.IsChecked(),
-			ServerPort:               serverPort.Value(),
-			ServerAuthToken:          serverToken.Text(),
-			EnableSMS:                enableSMS.IsChecked(),
-			TwilioAccountSID:         smsSID.Text(),
-			TwilioAuthToken:          smsToken.Text(),
-			TwilioFromNumber:         smsFrom.Text(),
-			SMSAllowedNumbers:        allowed,
-			SMSPollSeconds:           smsPoll.Value(),
-			EnableTelegram:           enableTelegram.IsChecked(),
-			TelegramBotToken:         tgToken.Text(),
-			TelegramAllowedUsernames: tgAllowedList,
+			Theme:                   theme.CurrentText(),
+			APIEndpoint:             endpoint.Text(),
+			APIKey:                  apiKey.Text(),
+			Model:                   model.CurrentText(),
+			SystemPrompt:            systemPrompt.ToPlainText(),
+			HistoryMessages:         historyMessages.Value(),
+			STTEndpoint:             sttEndpoint.Text(),
+			STTAPIKey:               sttAPIKey.Text(),
+			STTModel:                sttModel.CurrentText(),
+			ContinuousConversation:  continuousConv.IsChecked(),
+			EnableTTS:               enableTTS.IsChecked(),
+			TTSEndpoint:             ttsEndpoint.Text(),
+			TTSAPIKey:               ttsAPIKey.Text(),
+			TTSModel:                ttsModel.CurrentText(),
+			TTSVoice:                ttsVoice.Text(),
+			InputDevice:             inputDevice.CurrentText(),
+			OutputDevice:            outputDevice.CurrentText(),
+			SaveToDisk:              autoSave.IsChecked(),
+			EnableImageGen:          enableImageGen.IsChecked(),
+			ComfyUIEndpoint:         comfyEndpoint.Text(),
+			ImagePrompt:             imagePromptEdit.ToPlainText(),
+			ImageClothing:           imageClothingEdit.ToPlainText(),
+			ImageNudity:             imageNudityEdit.ToPlainText(),
+			ImageNegativePrompt:     imageNegEdit.ToPlainText(),
+			ImageSteps:              imageSteps.Value(),
+			EnableServer:            enableServer.IsChecked(),
+			ServerExposeNetwork:     serverExpose.IsChecked(),
+			ServerPort:              serverPort.Value(),
+			ServerAuthToken:         serverToken.Text(),
+			EnableSMS:               enableSMS.IsChecked(),
+			TwilioAccountSID:        smsSID.Text(),
+			TwilioAuthToken:         smsToken.Text(),
+			TwilioFromNumber:        smsFrom.Text(),
+			SMSAllowedNumbers:       allowed,
+			SMSPollSeconds:          smsPoll.Value(),
+			EnableTelegram:          enableTelegram.IsChecked(),
+			TelegramBotToken:        tgToken.Text(),
+			TelegramAllowedUsername: strings.TrimSpace(tgUsername.Text()),
 		}
 		if err := updated.Save(); err != nil {
 			qt.QMessageBox_Warning(parent, "Settings",
