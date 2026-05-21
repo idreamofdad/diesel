@@ -192,7 +192,7 @@ func TestManager_Apply_StartStop(t *testing.T) {
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://127.0.0.1:"+itoa(port)+"/api/v1/state", nil)
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
-	resp.Body.Close()
+	require.NoError(t, resp.Body.Close())
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 
 	// Apply disabled — server should stop.
@@ -202,7 +202,7 @@ func TestManager_Apply_StartStop(t *testing.T) {
 	// Now confirm the port is free.
 	ln2, err := net.Listen("tcp", "127.0.0.1:"+itoa(port))
 	require.NoError(t, err, "port should be released after Apply(disabled)")
-	ln2.Close()
+	require.NoError(t, ln2.Close())
 }
 
 // TestManager_Apply_BindFailureKeepsPriorRunning — a failed bind on
@@ -217,7 +217,7 @@ func TestManager_Apply_BindFailureKeepsPriorRunning(t *testing.T) {
 	// Grab another port and hold it so the second Apply collides.
 	blocker, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
-	defer blocker.Close()
+	defer func() { _ = blocker.Close() }()
 	badPort := blocker.Addr().(*net.TCPAddr).Port
 
 	h := hub.New()

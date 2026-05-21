@@ -29,7 +29,7 @@ func TestConfig_Validate(t *testing.T) {
 
 	c := full
 	c.token = ""
-	assert.ErrorContains(t, c.validate(), "Bot Token")
+	assert.ErrorContains(t, c.validate(), "bot token")
 
 	c = full
 	c.allowed = ""

@@ -123,7 +123,7 @@ func (c config) equal(o config) bool {
 func (c config) validate() error {
 	switch {
 	case c.token == "":
-		return errors.New("Bot Token is empty")
+		return errors.New("bot token is empty")
 	case c.allowed == "":
 		return errors.New("no allowed username configured")
 	}
