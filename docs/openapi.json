@@ -1,0 +1,688 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Diesel API",
+    "version": "1.0.0",
+    "description": "HTTP + WebSocket API that exposes the Diesel chat. External clients (e.g. an Android app) drive the same conversation as the desktop GUI and web UI. All clients — desktop, web, SMS, Telegram, and any API client — share one conversation.",
+    "license": {
+      "name": "MIT"
+    }
+  },
+  "servers": [
+    {
+      "url": "http://{host}:{port}/api/v1",
+      "description": "Diesel server. Host/port are set in Settings (Server tab). Enable \"Expose on network\" to bind 0.0.0.0 for LAN access.",
+      "variables": {
+        "host": {
+          "default": "127.0.0.1"
+        },
+        "port": {
+          "default": "7777"
+        }
+      }
+    }
+  ],
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
+  "tags": [
+    {
+      "name": "chat",
+      "description": "Drive the shared conversation"
+    },
+    {
+      "name": "media",
+      "description": "Fetch portraits and TTS audio by ID"
+    },
+    {
+      "name": "settings",
+      "description": "Read/write app configuration"
+    },
+    {
+      "name": "websocket",
+      "description": "Real-time event stream (documented for reference; not callable via OpenAPI)"
+    }
+  ],
+  "paths": {
+    "/state": {
+      "get": {
+        "tags": ["chat"],
+        "summary": "Conversation snapshot",
+        "description": "Snapshot for a freshly-connected client: transcript, in-flight flag, status, and the latest portrait URL.",
+        "operationId": "getState",
+        "responses": {
+          "200": {
+            "description": "Current conversation state",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/State" }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/send": {
+      "post": {
+        "tags": ["chat"],
+        "summary": "Post a user message",
+        "operationId": "sendMessage",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/SendRequest" }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Message accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": { "ok": { "type": "boolean", "const": true } }
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "409": { "$ref": "#/components/responses/Busy" },
+          "500": { "$ref": "#/components/responses/ServerError" }
+        }
+      }
+    },
+    "/clear": {
+      "post": {
+        "tags": ["chat"],
+        "summary": "Wipe the conversation",
+        "operationId": "clearConversation",
+        "responses": {
+          "204": { "description": "Conversation cleared" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "409": { "$ref": "#/components/responses/Busy" },
+          "500": { "$ref": "#/components/responses/ServerError" }
+        }
+      }
+    },
+    "/transcribe": {
+      "post": {
+        "tags": ["chat"],
+        "summary": "Transcribe voice input and post it as a turn",
+        "description": "Multipart upload for voice input. The server runs STT, then feeds the recognized text into the conversation as a turn.",
+        "operationId": "transcribe",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": ["file"],
+                "properties": {
+                  "file": {
+                    "type": "string",
+                    "format": "binary",
+                    "description": "Audio blob (codecs browsers/MediaRecorder produce are accepted)"
+                  },
+                  "origin": {
+                    "type": "string",
+                    "description": "Client ID so reply audio routes back. Defaults to \"anonymous\"."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Transcription result. `sent` is true when the recognized text was posted as a turn; `text` is empty when no speech was detected.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/TranscribeResponse" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "502": { "$ref": "#/components/responses/BadGateway" }
+        }
+      }
+    },
+    "/portrait/{id}": {
+      "get": {
+        "tags": ["media"],
+        "summary": "Fetch a portrait PNG",
+        "description": "Fetch a portrait by the ID embedded in WebSocket event URLs. An `id` of `latest` returns the freshest portrait. Media evicts from a small cache within seconds — fetch promptly.",
+        "operationId": "getPortrait",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" },
+            "description": "Portrait ID, or the literal `latest`"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "PNG image",
+            "content": {
+              "image/png": {
+                "schema": { "type": "string", "format": "binary" }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "description": "No such portrait (or it has evicted from the cache)" }
+        }
+      }
+    },
+    "/portrait-preview/{id}": {
+      "get": {
+        "tags": ["media"],
+        "summary": "Fetch an intermediate render frame",
+        "description": "Serves a cached intermediate preview frame for an in-progress portrait render. Frames evict quickly as new ones arrive, so 404 is expected for older frames.",
+        "operationId": "getPortraitPreview",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Preview image (JPEG or PNG; content type is sniffed)",
+            "content": {
+              "image/jpeg": { "schema": { "type": "string", "format": "binary" } },
+              "image/png": { "schema": { "type": "string", "format": "binary" } }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "description": "No such preview frame (or it has evicted from the cache)" }
+        }
+      }
+    },
+    "/audio/{id}": {
+      "get": {
+        "tags": ["media"],
+        "summary": "Fetch TTS audio",
+        "description": "Serves cached TTS audio by the ID embedded in `audio_ready` WebSocket events. Media evicts from a small cache within seconds — fetch promptly.",
+        "operationId": "getAudio",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Audio bytes. The exact format depends on the upstream TTS endpoint; browsers handle WAV/MP3/Opus without help.",
+            "content": {
+              "audio/mpeg": { "schema": { "type": "string", "format": "binary" } }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "description": "No such audio (or it has evicted from the cache)" }
+        }
+      }
+    },
+    "/settings": {
+      "get": {
+        "tags": ["settings"],
+        "summary": "Read app configuration",
+        "description": "Returns the on-disk settings. Secrets are returned masked as `********`.",
+        "operationId": "getSettings",
+        "responses": {
+          "200": {
+            "description": "Current settings (secrets masked)",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/AppSettings" }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      },
+      "post": {
+        "tags": ["settings"],
+        "summary": "Save app configuration",
+        "description": "Persists the merged settings. Server-tab fields, audio devices, and SMS/Telegram credentials are not writable from the API and are preserved verbatim. Secret fields equal to `********` are treated as unchanged. Returns the saved settings, masked.",
+        "operationId": "saveSettings",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/AppSettings" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Saved settings (secrets masked)",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/AppSettings" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "500": { "$ref": "#/components/responses/ServerError" }
+        }
+      }
+    },
+    "/settings/models": {
+      "post": {
+        "tags": ["settings"],
+        "summary": "List models for a service",
+        "description": "Fetches the model list from an LLM/STT/TTS service for the settings form dropdowns. Masked keys are resolved against saved settings.",
+        "operationId": "listModels",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/ProbeRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Model list. On an upstream failure, `models` is empty and `error` carries the message.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ModelsResponse" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/settings/test": {
+      "post": {
+        "tags": ["settings"],
+        "summary": "Probe a service connection",
+        "description": "Probes an LLM/STT/image service and returns a short human-readable status string.",
+        "operationId": "testConnection",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/ProbeRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Probe result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": { "status": { "type": "string", "examples": ["✓ Connected — multiple models available."] } }
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/settings/test-tts": {
+      "post": {
+        "tags": ["settings"],
+        "summary": "Synthesize a TTS sample",
+        "description": "Synthesizes a short sample so the user can hear the configured voice. On success returns WAV audio; on failure returns a 200 with an `error` field.",
+        "operationId": "testTTS",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/ProbeRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "WAV audio on success, or a JSON object with an `error` field on failure.",
+            "content": {
+              "audio/wav": {
+                "schema": { "type": "string", "format": "binary" }
+              },
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": { "error": { "type": "string" } }
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/ws": {
+      "get": {
+        "tags": ["websocket"],
+        "summary": "WebSocket event stream",
+        "description": "Upgrades to a WebSocket. `ws://<host>:<port>/api/v1/ws?client_id=<id>&token=<token>`. The client picks a stable `client_id` and reuses it across reconnects so reply-audio routing stays consistent. The server pings every 25s; reconnect with backoff on drop and re-fetch `GET /state` on resume.\n\nClient → server commands are JSON objects: `{\"type\":\"send\",\"text\":\"...\"}`, `{\"type\":\"clear\"}`, `{\"type\":\"ping\"}`. Unknown commands are ignored. `send` over the socket uses the connection's `client_id` as the origin automatically.\n\nServer → client frames are `Event` objects (see the `Event` schema). The first frame after upgrade is an `ack`.",
+        "operationId": "websocket",
+        "parameters": [
+          {
+            "name": "client_id",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" },
+            "description": "Stable client identifier. If omitted the server assigns one and returns it in the `ack` frame."
+          },
+          {
+            "name": "token",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" },
+            "description": "Auth token, when one is configured. The Authorization header also works for native clients."
+          }
+        ],
+        "responses": {
+          "101": { "description": "Switching Protocols — WebSocket established" },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Static bearer token configured in Settings (Server tab). When blank, auth is disabled and requests succeed without a token. A wrong or missing token returns 401."
+      }
+    },
+    "responses": {
+      "BadRequest": {
+        "description": "Malformed request",
+        "content": {
+          "application/json": { "schema": { "$ref": "#/components/schemas/Error" } }
+        }
+      },
+      "Unauthorized": {
+        "description": "Missing or invalid auth token",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/Error" },
+            "example": { "error": "unauthorized" }
+          }
+        }
+      },
+      "Busy": {
+        "description": "Another turn is in flight",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/Error" },
+            "example": { "error": "busy" }
+          }
+        }
+      },
+      "ServerError": {
+        "description": "Internal error",
+        "content": {
+          "application/json": { "schema": { "$ref": "#/components/schemas/Error" } }
+        }
+      },
+      "BadGateway": {
+        "description": "Upstream service (e.g. STT) failed",
+        "content": {
+          "application/json": { "schema": { "$ref": "#/components/schemas/Error" } }
+        }
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "properties": {
+          "error": { "type": "string" }
+        },
+        "required": ["error"]
+      },
+      "Message": {
+        "type": "object",
+        "description": "A single conversation message.",
+        "properties": {
+          "role": {
+            "type": "string",
+            "enum": ["user", "assistant", "system"]
+          },
+          "content": { "type": "string" },
+          "timestamp": { "type": "string", "format": "date-time" },
+          "emotion": {
+            "type": "string",
+            "description": "Present on some assistant messages."
+          }
+        },
+        "required": ["role", "content"]
+      },
+      "Usage": {
+        "type": "object",
+        "description": "Token accounting for a completed turn.",
+        "properties": {
+          "prompt_tokens": { "type": "integer" },
+          "completion_tokens": { "type": "integer" },
+          "total_tokens": { "type": "integer" }
+        }
+      },
+      "State": {
+        "type": "object",
+        "properties": {
+          "history": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/Message" }
+          },
+          "in_flight": {
+            "type": "boolean",
+            "description": "True while a turn is being processed."
+          },
+          "status": {
+            "type": "string",
+            "description": "Free-form status-bar string."
+          },
+          "portrait_url": {
+            "type": "string",
+            "description": "Present only when a portrait has been rendered.",
+            "examples": ["/api/v1/portrait/abc123"]
+          }
+        },
+        "required": ["history", "in_flight", "status"]
+      },
+      "SendRequest": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string",
+            "description": "Message body. Trimmed; must be non-empty.",
+            "minLength": 1
+          },
+          "origin": {
+            "type": "string",
+            "description": "Client's stable ID so reply audio routes back to it. Defaults to \"anonymous\"."
+          }
+        },
+        "required": ["text"]
+      },
+      "TranscribeResponse": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string",
+            "description": "Recognized text. Empty when no speech was detected."
+          },
+          "sent": {
+            "type": "boolean",
+            "description": "True when the recognized text was posted as a turn."
+          },
+          "send_error": {
+            "type": "string",
+            "description": "Present when transcription succeeded but posting the turn failed."
+          }
+        },
+        "required": ["text"]
+      },
+      "ProbeRequest": {
+        "type": "object",
+        "description": "Body for the model-list and test endpoints. Only the fields the `kind` cares about are read.",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": ["llm", "stt", "tts", "image"],
+            "description": "Which service to probe. `image` is only valid on /settings/test."
+          },
+          "endpoint": { "type": "string" },
+          "api_key": {
+            "type": "string",
+            "description": "Send `********` to reuse the saved key without retyping it."
+          },
+          "model": { "type": "string" },
+          "voice": { "type": "string" },
+          "text": {
+            "type": "string",
+            "description": "Sample text for /settings/test-tts. Defaults to a built-in phrase."
+          }
+        },
+        "required": ["kind"]
+      },
+      "ModelsResponse": {
+        "type": "object",
+        "properties": {
+          "models": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "context_length": {
+            "type": "integer",
+            "description": "LLM context window, present only for kind=llm with a model selected."
+          },
+          "error": {
+            "type": "string",
+            "description": "Present when the upstream model fetch failed; `models` is then empty."
+          }
+        },
+        "required": ["models"]
+      },
+      "Event": {
+        "type": "object",
+        "description": "A server → client WebSocket frame. The `type` field discriminates which optional fields are populated.",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "ack",
+              "turn_started",
+              "turn_complete",
+              "audio_ready",
+              "portrait_ready",
+              "portrait_progress",
+              "turn_error",
+              "status",
+              "cleared",
+              "busy"
+            ],
+            "description": "ack: sent right after upgrade, seeds client_id/status/in_flight/portrait_url. turn_started: a turn began, carries `user`. turn_complete: assistant reply ready, carries `assistant`/`emotion`/`naked`/`usage`. audio_ready: TTS done, `audio_url` set if synthesis produced audio (broadcast, but only the client matching `origin` should play it). portrait_ready: portrait done, `portrait_url` set if image gen produced one. portrait_progress: intermediate render frame, `portrait_url` is a preview, `step`/`total` give progress. turn_error: the turn failed, `error` holds the message. status: free-form status-bar string in `status`. cleared: the conversation was wiped. busy: a send was rejected because a turn is in flight."
+          },
+          "client_id": {
+            "type": "string",
+            "description": "Present on `ack` frames."
+          },
+          "origin": {
+            "type": "string",
+            "description": "The client_id that started the turn."
+          },
+          "turn_id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Monotonic per-turn counter, correlates later media events to their turn."
+          },
+          "user": { "$ref": "#/components/schemas/Message" },
+          "assistant": { "$ref": "#/components/schemas/Message" },
+          "emotion": { "type": "string" },
+          "naked": { "type": "boolean" },
+          "portrait_url": { "type": "string" },
+          "audio_url": {
+            "type": "string",
+            "description": "Empty means \"no audio for this turn\" (TTS off or synthesis failed) — not an error."
+          },
+          "usage": { "$ref": "#/components/schemas/Usage" },
+          "step": { "type": "integer" },
+          "total": { "type": "integer" },
+          "status": { "type": "string" },
+          "error": { "type": "string" },
+          "in_flight": {
+            "type": "boolean",
+            "description": "Present on `ack` frames."
+          },
+          "timestamp": { "type": "string", "format": "date-time" }
+        },
+        "required": ["type", "timestamp"]
+      },
+      "AppSettings": {
+        "type": "object",
+        "description": "Diesel app configuration. Secrets (api_key, stt_api_key, tts_api_key, server_auth_token, twilio_auth_token, telegram_bot_token) are returned masked as `********`; send the mask back unchanged to keep the stored value. Server-tab fields, audio devices, and SMS/Telegram credentials are not writable via this API.",
+        "properties": {
+          "theme": { "type": "string" },
+          "api_endpoint": { "type": "string" },
+          "api_key": { "type": "string" },
+          "model": { "type": "string" },
+          "system_prompt": { "type": "string" },
+          "history_messages": { "type": "integer" },
+          "stt_endpoint": { "type": "string" },
+          "stt_api_key": { "type": "string" },
+          "stt_model": { "type": "string" },
+          "continuous_conversation": { "type": "boolean" },
+          "enable_tts": { "type": "boolean" },
+          "tts_endpoint": { "type": "string" },
+          "tts_api_key": { "type": "string" },
+          "tts_model": { "type": "string" },
+          "tts_voice": { "type": "string" },
+          "input_device": { "type": "string" },
+          "output_device": { "type": "string" },
+          "save_to_disk": { "type": "boolean" },
+          "enable_image_gen": { "type": "boolean" },
+          "comfyui_endpoint": { "type": "string" },
+          "image_prompt": { "type": "string" },
+          "image_clothing": { "type": "string" },
+          "image_nudity": { "type": "string" },
+          "image_negative_prompt": { "type": "string" },
+          "image_steps": { "type": "integer" },
+          "enable_server": { "type": "boolean", "readOnly": true },
+          "server_expose_network": { "type": "boolean", "readOnly": true },
+          "server_port": { "type": "integer", "readOnly": true },
+          "server_auth_token": { "type": "string", "readOnly": true },
+          "enable_sms": { "type": "boolean", "readOnly": true },
+          "twilio_account_sid": { "type": "string", "readOnly": true },
+          "twilio_auth_token": { "type": "string", "readOnly": true },
+          "twilio_from_number": { "type": "string", "readOnly": true },
+          "sms_allowed_numbers": {
+            "type": "array",
+            "items": { "type": "string" },
+            "readOnly": true
+          },
+          "sms_poll_seconds": { "type": "integer", "readOnly": true },
+          "enable_telegram": { "type": "boolean", "readOnly": true },
+          "telegram_bot_token": { "type": "string", "readOnly": true },
+          "telegram_allowed_username": { "type": "string", "readOnly": true }
+        }
+      }
+    }
+  }
+}
