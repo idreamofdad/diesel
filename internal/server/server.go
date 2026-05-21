@@ -167,11 +167,17 @@ func (m *Manager) Apply(s settings.AppSettings) string {
 		}
 	}()
 
-	bindURL := fmt.Sprintf("http://%s:%d", host, cfg.port)
+	bindURL := fmt.Sprintf("http://127.0.0.1:%d", cfg.port)
 	if cfg.expose {
-		// On 0.0.0.0 it's more useful to print loopback in the status
-		// — the user usually wants to copy a URL they can hit.
-		bindURL = fmt.Sprintf("http://127.0.0.1:%d (also LAN)", cfg.port)
+		// Bound to 0.0.0.0, but loopback isn't reachable from other
+		// machines — show the LAN IP so the status is a URL the user
+		// can actually copy onto another device. Fall back to loopback
+		// if no LAN address can be determined (e.g. offline host).
+		if ip := lanIP(); ip != "" {
+			bindURL = fmt.Sprintf("http://%s:%d", ip, cfg.port)
+		} else {
+			bindURL = fmt.Sprintf("http://127.0.0.1:%d (also LAN)", cfg.port)
+		}
 	}
 	m.mu.Lock()
 	m.srv = newSrv
