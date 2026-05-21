@@ -87,7 +87,6 @@ The server pings every 25s; reconnect with backoff on drop and re-fetch
 
 ```json
 { "type": "send", "text": "hello" }
-{ "type": "clear" }
 { "type": "ping" }
 ```
 

@@ -365,7 +365,7 @@
       "get": {
         "tags": ["websocket"],
         "summary": "WebSocket event stream",
-        "description": "Upgrades to a WebSocket. `ws://<host>:<port>/api/v1/ws?client_id=<id>&token=<token>`. The client picks a stable `client_id` and reuses it across reconnects so reply-audio routing stays consistent. The server pings every 25s; reconnect with backoff on drop and re-fetch `GET /state` on resume.\n\nClient → server commands are JSON objects: `{\"type\":\"send\",\"text\":\"...\"}`, `{\"type\":\"clear\"}`, `{\"type\":\"ping\"}`. Unknown commands are ignored. `send` over the socket uses the connection's `client_id` as the origin automatically.\n\nServer → client frames are `Event` objects (see the `Event` schema). The first frame after upgrade is an `ack`.",
+        "description": "Upgrades to a WebSocket. `ws://<host>:<port>/api/v1/ws?client_id=<id>&token=<token>`. The client picks a stable `client_id` and reuses it across reconnects so reply-audio routing stays consistent. The server pings every 25s; reconnect with backoff on drop and re-fetch `GET /state` on resume.\n\nClient → server commands are JSON objects: `{\"type\":\"send\",\"text\":\"...\"}`, `{\"type\":\"ping\"}`. Unknown commands are ignored. `send` over the socket uses the connection's `client_id` as the origin automatically.\n\nServer → client frames are `Event` objects (see the `Event` schema). The first frame after upgrade is an `ack`.",
         "operationId": "websocket",
         "parameters": [
           {

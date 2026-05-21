@@ -1,7 +1,7 @@
 // hub.ts is the client-side mirror of the Go hub. It owns the WebSocket
 // connection, the reactive state stores, and the helpers that send
 // commands or fetch media. Components import the stores directly and
-// call sendMessage / clearConversation / fetchAudio to interact.
+// call sendMessage / fetchAudio to interact.
 //
 // Reconnect: the WS reconnects with exponential backoff (1s → 30s)
 // whenever it drops. Reconnects reuse the same client_id so the hub

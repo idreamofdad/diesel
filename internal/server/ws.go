@@ -17,7 +17,7 @@ import (
 
 // wsCommand is the shape browser clients send over the WS upstream. The
 // server is mostly broadcast-driven, so commands are short: send a
-// message, clear the conversation, ping the heartbeat.
+// message, ping the heartbeat.
 type wsCommand struct {
 	Type string `json:"type"`
 	Text string `json:"text,omitempty"`
