@@ -429,7 +429,7 @@ func (h *Hub) runTurn(ctx context.Context, s settings.AppSettings, snapshot []ch
 		return
 	}
 
-	assistant := chat.Message{Role: chat.RoleAssistant, Content: reply.Text, Emotion: reply.Emotion, Timestamp: time.Now()}
+	assistant := chat.Message{Role: chat.RoleAssistant, Content: reply.Text, Emotion: reply.Emotion, Naked: reply.Naked, Timestamp: time.Now()}
 	h.mu.Lock()
 	h.history = append(h.history, assistant)
 	hist := append([]chat.Message(nil), h.history...)
