@@ -168,7 +168,7 @@ func main() {
 	portrait.SetStyleSheet(
 		"background-color: #232323; border: 1px solid #3a3a3a;" +
 			"border-radius: 4px; color: #888;")
-	portrait.QWidget.SetSizePolicy2(qt.QSizePolicy__Fixed, qt.QSizePolicy__Preferred)
+	portrait.SetSizePolicy2(qt.QSizePolicy__Fixed, qt.QSizePolicy__Preferred)
 	portrait.SetCursor(qt.NewQCursor2(qt.PointingHandCursor))
 	portrait.SetToolTip("Double-click to view full size")
 	portraitCol.AddWidget(portrait.QWidget)
@@ -281,8 +281,8 @@ func main() {
 	footerLayout := qt.NewQHBoxLayout(footer)
 	footerLayout.SetContentsMargins(14, 8, 14, 8)
 	status := qt.NewQLabel5("Ready", nil)
-	status.QWidget.SetSizePolicy2(qt.QSizePolicy__Ignored, qt.QSizePolicy__Preferred)
-	status.QWidget.SetMinimumWidth(0)
+	status.SetSizePolicy2(qt.QSizePolicy__Ignored, qt.QSizePolicy__Preferred)
+	status.SetMinimumWidth(0)
 	footerLayout.AddWidget2(status.QWidget, 1)
 
 	tokensLabel := qt.NewQLabel5("", nil)
@@ -293,7 +293,7 @@ func main() {
 
 	statusRaw := "Ready"
 	applyStatus := func() {
-		w := status.QWidget.Width()
+		w := status.Width()
 		if w <= 0 {
 			status.SetText(statusRaw)
 			return
@@ -387,7 +387,7 @@ func main() {
 			}
 			sendBtn.SetEnabled(true)
 			message.SetEnabled(true)
-			message.QWidget.SetFocus()
+			message.SetFocus()
 			if ev.Usage != nil {
 				total := ev.Usage.TotalTokens
 				if total == 0 {
