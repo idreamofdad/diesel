@@ -11,6 +11,7 @@ package server
 
 import (
 	"context"
+	_ "embed"
 	"errors"
 	"fmt"
 	"io"
@@ -28,6 +29,13 @@ import (
 
 	"github.com/gin-gonic/gin"
 )
+
+// openAPISpec is the OpenAPI 3.1 description of the /api/v1 surface,
+// served verbatim at /openapi.json so external clients can generate
+// bindings against it.
+//
+//go:embed openapi.json
+var openAPISpec []byte
 
 // Manager owns the HTTP server and reacts to settings changes. The zero
 // value is unusable; construct with New.
@@ -238,6 +246,13 @@ func (m *Manager) buildRouter(token string) *gin.Engine {
 	api.POST("/settings/models", m.handleSettingsModels)
 	api.POST("/settings/test", m.handleSettingsTest)
 	api.POST("/settings/test-tts", m.handleSettingsTestTTS)
+
+	// The API description is served unauthenticated off the root so a
+	// client can discover the surface (and the auth scheme) before it
+	// has a token.
+	r.GET("/openapi.json", func(c *gin.Context) {
+		c.Data(http.StatusOK, "application/json; charset=utf-8", openAPISpec)
+	})
 
 	// Static UI: serve the embedded SPA off /. The file server is wired
 	// up only when the embed actually contains an index.html — fresh
