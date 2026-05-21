@@ -357,7 +357,7 @@ func main() {
 		}
 		message.Clear()
 		lastDesktopWasVoice = viaVoice
-		if err := h.Send(context.Background(), text, desktopOrigin); err != nil {
+		if err := h.Send(context.Background(), text, desktopOrigin, false); err != nil {
 			setStatus("✗ " + err.Error())
 		}
 	}

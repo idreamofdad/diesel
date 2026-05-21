@@ -326,7 +326,7 @@ func (m *Manager) pollOnce(ctx context.Context, client *Client, cfg config, sinc
 		// the assignment after Send returns.
 		origin := originPrefix + msg.From
 		log.Printf("[sms] inbound from=%s sid=%s body=%q -> hub", msg.From, msg.SID, body)
-		if err := m.hub.Send(ctx, body, origin); err != nil {
+		if err := m.hub.Send(ctx, body, origin, false); err != nil {
 			// Hub busy: tell the user via SMS instead of silently
 			// dropping. They can resend once the in-flight turn ends.
 			if errors.Is(err, hub.ErrBusy) {

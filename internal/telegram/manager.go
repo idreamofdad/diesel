@@ -391,7 +391,9 @@ func (m *Manager) dispatchLoop(ctx context.Context, sub *hub.Subscriber, bot *tg
 		for len(queue) > 0 {
 			p := queue[0]
 			origin := originPrefix + strconv.FormatInt(p.chatID, 10)
-			err := m.hub.Send(ctx, p.text, origin)
+			// Telegram displays photos wide, so Telegram-originated
+			// turns always render a landscape portrait.
+			err := m.hub.Send(ctx, p.text, origin, true)
 			if err == nil {
 				queue = queue[1:]
 				return
