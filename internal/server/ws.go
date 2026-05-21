@@ -25,7 +25,7 @@ type wsCommand struct {
 
 // wsAckEvent is the synthetic event the server sends right after upgrade
 // so clients can seed their state (history snapshot, in-flight flag,
-// status string, latest portrait URL) without an additional /api/state
+// status string, latest portrait URL) without an additional /api/v1/state
 // round-trip.
 type wsAckEvent struct {
 	Type        string `json:"type"`
@@ -66,7 +66,7 @@ func (m *Manager) handleWS(c *gin.Context) {
 	defer m.hub.Unsubscribe(clientID)
 
 	// Send the initial state so the client can paint without a separate
-	// /api/state fetch. The web client subscribes to this ack frame and
+	// /api/v1/state fetch. The web client subscribes to this ack frame and
 	// requests the full history via REST when it's needed (cheap on
 	// loopback, and keeps the WS frame small).
 	ack := wsAckEvent{
@@ -76,7 +76,7 @@ func (m *Manager) handleWS(c *gin.Context) {
 		InFlight: m.hub.InFlight(),
 	}
 	if id, png := m.hub.LatestPortrait(); id != "" && len(png) > 0 {
-		ack.PortraitURL = "/api/portrait/" + id
+		ack.PortraitURL = "/api/v1/portrait/" + id
 	}
 	if raw, err := json.Marshal(ack); err == nil {
 		_ = conn.Write(c.Request.Context(), websocket.MessageText, raw)

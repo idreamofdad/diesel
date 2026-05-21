@@ -21,8 +21,8 @@ import (
 const secretMask = "********"
 
 // maskSettings copies s and replaces every secret with secretMask when
-// the underlying value is non-empty. Used both by GET /api/settings and
-// by the response of POST /api/settings.
+// the underlying value is non-empty. Used both by GET /api/v1/settings and
+// by the response of POST /api/v1/settings.
 func maskSettings(s settings.AppSettings) settings.AppSettings {
 	if s.APIKey != "" {
 		s.APIKey = secretMask
@@ -127,7 +127,7 @@ func (m *Manager) handleSettingsSave(c *gin.Context) {
 	c.JSON(http.StatusOK, maskSettings(merged))
 }
 
-// probeRequest is the body for /api/settings/probe and the test
+// probeRequest is the body for /api/v1/settings/probe and the test
 // endpoints. Most fields are optional — only the ones the kind cares
 // about are read.
 type probeRequest struct {

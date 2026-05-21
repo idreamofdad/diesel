@@ -223,7 +223,7 @@ func (m *Manager) buildRouter(token string) *gin.Engine {
 		c.Next()
 	})
 
-	api := r.Group("/api")
+	api := r.Group("/api/v1")
 	api.Use(authMiddleware(token))
 	api.GET("/state", m.handleState)
 	api.POST("/send", m.handleSend)
@@ -377,7 +377,7 @@ func (m *Manager) handleState(c *gin.Context) {
 		"status":    m.hub.LastStatus(),
 	}
 	if id, png := m.hub.LatestPortrait(); id != "" && len(png) > 0 {
-		resp["portrait_url"] = "/api/portrait/" + id
+		resp["portrait_url"] = "/api/v1/portrait/" + id
 	}
 	c.JSON(http.StatusOK, resp)
 }

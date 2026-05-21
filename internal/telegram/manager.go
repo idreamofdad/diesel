@@ -617,7 +617,7 @@ func (m *Manager) send(bot *tgbotapi.BotAPI, chatID int64, text string) int {
 // photo's message ID so the caller can delete it when the next portrait
 // replaces it.
 func (m *Manager) sendPortrait(bot *tgbotapi.BotAPI, ref turnRef, portraitURL string) (int, bool) {
-	id := strings.TrimPrefix(portraitURL, "/api/portrait/")
+	id := strings.TrimPrefix(portraitURL, "/api/v1/portrait/")
 	data, ok := m.hub.Portrait(id)
 	if !ok || len(data) == 0 {
 		// The cache is small (8 entries); a slow turn could see its

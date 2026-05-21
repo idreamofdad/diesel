@@ -412,7 +412,7 @@ func main() {
 				lastDesktopWasVoice = false
 			}
 			if ev.AudioURL != "" {
-				id := strings.TrimPrefix(ev.AudioURL, "/api/audio/")
+				id := strings.TrimPrefix(ev.AudioURL, "/api/v1/audio/")
 				if data, ok := h.Audio(id); ok && len(data) > 0 {
 					if voice != nil {
 						voice.Stop()
@@ -435,14 +435,14 @@ func main() {
 			// (cache evicted, slow event loop, etc.) — the next frame
 			// or the final EventPortraitReady will land soon enough.
 			if ev.PortraitURL != "" {
-				id := strings.TrimPrefix(ev.PortraitURL, "/api/portrait-preview/")
+				id := strings.TrimPrefix(ev.PortraitURL, "/api/v1/portrait-preview/")
 				if data, ok := h.PortraitPreview(id); ok {
 					showPortrait(data, false)
 				}
 			}
 		case hub.EventPortraitReady:
 			if ev.PortraitURL != "" {
-				id := strings.TrimPrefix(ev.PortraitURL, "/api/portrait/")
+				id := strings.TrimPrefix(ev.PortraitURL, "/api/v1/portrait/")
 				if data, ok := h.Portrait(id); ok {
 					showPortrait(data, true)
 				}

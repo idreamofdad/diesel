@@ -118,10 +118,10 @@ type Event struct {
 	// Emotion and Naked are extracted from the structured reply.
 	Emotion string `json:"emotion,omitempty"`
 	Naked   bool   `json:"naked,omitempty"`
-	// PortraitURL is "/api/portrait/<id>"; set on EventTurnComplete when
+	// PortraitURL is "/api/v1/portrait/<id>"; set on EventTurnComplete when
 	// image generation produced something. Broadcast to every subscriber.
 	PortraitURL string `json:"portrait_url,omitempty"`
-	// AudioURL is "/api/audio/<id>"; set on EventTurnComplete when TTS
+	// AudioURL is "/api/v1/audio/<id>"; set on EventTurnComplete when TTS
 	// synthesis succeeded. Broadcast to every subscriber, but Origin
 	// determines who should actually fetch+play it.
 	AudioURL string      `json:"audio_url,omitempty"`
@@ -199,7 +199,7 @@ func New() *Hub {
 }
 
 // Start loads persisted history from disk when SaveToDisk is enabled and
-// seeds the most-recent portrait into the cache so the first /api/portrait
+// seeds the most-recent portrait into the cache so the first /api/v1/portrait
 // fetch hits something.
 func (h *Hub) Start(ctx context.Context) {
 	s := settings.Load()
@@ -499,7 +499,7 @@ func (h *Hub) synthesizeAudio(ctx context.Context, s settings.AppSettings, reply
 	h.mu.Lock()
 	h.audio.put(id, data)
 	h.mu.Unlock()
-	ev.AudioURL = "/api/audio/" + id
+	ev.AudioURL = "/api/v1/audio/" + id
 }
 
 // renderPortrait runs ComfyUI image generation and broadcasts
@@ -544,7 +544,7 @@ func (h *Hub) renderPortrait(ctx context.Context, s settings.AppSettings, reply 
 			h.mu.Lock()
 			h.previews.put(id, p.Preview)
 			h.mu.Unlock()
-			ev.PortraitURL = "/api/portrait-preview/" + id
+			ev.PortraitURL = "/api/v1/portrait-preview/" + id
 		}
 		h.broadcast(ev)
 	}
@@ -558,7 +558,7 @@ func (h *Hub) renderPortrait(ctx context.Context, s settings.AppSettings, reply 
 	h.mu.Lock()
 	h.portraits.put(id, png)
 	h.mu.Unlock()
-	ev.PortraitURL = "/api/portrait/" + id
+	ev.PortraitURL = "/api/v1/portrait/" + id
 }
 
 // composeImagePrompt assembles the image prompt the same way the
