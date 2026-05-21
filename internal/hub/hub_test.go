@@ -108,10 +108,7 @@ func TestSend_DetachesCallerContext(t *testing.T) {
 	deadline := time.After(3 * time.Second)
 	var sawStarted, sawError bool
 	var errMsg string
-	for {
-		if sawStarted && sawError {
-			break
-		}
+	for !sawStarted || !sawError {
 		select {
 		case ev, ok := <-sub.Events:
 			if !ok {
