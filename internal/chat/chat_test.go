@@ -116,6 +116,17 @@ func TestCompletion_ResponseParsing(t *testing.T) {
 			wantEmotion: "neutral",
 		},
 		{
+			// A valid structured reply with empty text must NOT be
+			// mistaken for a parse failure — otherwise the raw JSON blob
+			// leaks into the transcript.
+			name:        "empty text in a valid structured reply",
+			body:        jsonChoice(`{"text":"","emotion":"amused","naked":true}`, Usage{}),
+			status:      200,
+			wantText:    "",
+			wantEmotion: "amused",
+			wantNaked:   true,
+		},
+		{
 			name:        "missing emotion defaults to neutral",
 			body:        jsonChoice(`{"text":"ok"}`, Usage{}),
 			status:      200,
