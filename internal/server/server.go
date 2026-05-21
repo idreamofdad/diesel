@@ -183,6 +183,22 @@ func (m *Manager) Apply(s settings.AppSettings) string {
 	return st
 }
 
+// lanIP reports the host's primary LAN IPv4 address by inspecting the
+// local end of a UDP socket "connected" to an off-host address. No
+// packets are sent — this just asks the routing table which interface
+// would carry outbound traffic. Returns "" if it can't be determined.
+func lanIP() string {
+	conn, err := net.Dial("udp", "8.8.8.8:80")
+	if err != nil {
+		return ""
+	}
+	defer func() { _ = conn.Close() }()
+	if addr, ok := conn.LocalAddr().(*net.UDPAddr); ok {
+		return addr.IP.String()
+	}
+	return ""
+}
+
 // Stop shuts the server down for good. Safe to call from any goroutine
 // and at any time, including when nothing is running.
 func (m *Manager) Stop() {
