@@ -96,7 +96,7 @@ func TestSend_DetachesCallerContext(t *testing.T) {
 	sub := h.Subscribe("test")
 
 	ctx, cancel := context.WithCancel(context.Background())
-	require.NoError(t, h.Send(ctx, "hi", "test"))
+	require.NoError(t, h.Send(ctx, "hi", "test", false))
 	// Cancel immediately — mirrors a gin handler returning right
 	// after kicking off the turn.
 	cancel()

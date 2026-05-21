@@ -339,8 +339,10 @@ func (h *Hub) Clear(ctx context.Context) error {
 // which case the caller's UI should stay locked until EventTurnComplete
 // (or EventTurnError) arrives. `origin` identifies the subscriber that
 // initiated the turn — used for last-active TTS routing and surfaced in
-// the broadcast events.
-func (h *Hub) Send(ctx context.Context, text, origin string) error {
+// the broadcast events. `landscape` selects the portrait's orientation:
+// true transposes the workflow's Width/Height for a wide image (what the
+// Telegram bridge wants), false keeps the baked portrait dimensions.
+func (h *Hub) Send(ctx context.Context, text, origin string, landscape bool) error {
 	if text == "" {
 		return errors.New("empty message")
 	}
@@ -382,7 +384,7 @@ func (h *Hub) Send(ctx context.Context, text, origin string) error {
 	// turn pipeline genuinely outlives the originating request, so
 	// we keep the context's values (tracing span lineage) but drop
 	// the deadline/cancel.
-	go h.runTurn(context.WithoutCancel(ctx), s, snapshot, origin, turnID)
+	go h.runTurn(context.WithoutCancel(ctx), s, snapshot, origin, turnID, landscape)
 	return nil
 }
 
@@ -393,7 +395,7 @@ func (h *Hub) Send(ctx context.Context, text, origin string) error {
 // don't have to coalesce intermediate states). Failure of TTS or portrait
 // does not fail the turn; only the chat-completion error path emits
 // EventTurnError.
-func (h *Hub) runTurn(ctx context.Context, s settings.AppSettings, snapshot []chat.Message, origin string, turnID int64) {
+func (h *Hub) runTurn(ctx context.Context, s settings.AppSettings, snapshot []chat.Message, origin string, turnID int64, landscape bool) {
 	turnCtx, turnSpan := tracing.StartSpan(ctx, "hub.turn",
 		attribute.String("turn.origin", origin),
 		attribute.Int64("turn.id", turnID),
@@ -460,7 +462,7 @@ func (h *Hub) runTurn(ctx context.Context, s settings.AppSettings, snapshot []ch
 	// audio for this turn" signal to advance, otherwise they'd wait
 	// forever for a synthesis that's never coming.
 	go h.synthesizeAudio(turnCtx, s, reply, origin, turnID)
-	go h.renderPortrait(turnCtx, s, reply, origin, turnID)
+	go h.renderPortrait(turnCtx, s, reply, turnID, landscape)
 }
 
 // synthesizeAudio runs TTS and broadcasts EventAudioReady when done.
@@ -497,7 +499,7 @@ func (h *Hub) synthesizeAudio(ctx context.Context, s settings.AppSettings, reply
 // renderPortrait runs ComfyUI image generation and broadcasts
 // EventPortraitReady when done — same always-broadcast contract as
 // synthesizeAudio. Empty PortraitURL = "no portrait for this turn".
-func (h *Hub) renderPortrait(ctx context.Context, s settings.AppSettings, reply chat.Reply, origin string, turnID int64) {
+func (h *Hub) renderPortrait(ctx context.Context, s settings.AppSettings, reply chat.Reply, turnID int64, landscape bool) {
 	ev := Event{
 		Type:      EventPortraitReady,
 		TurnID:    turnID,
