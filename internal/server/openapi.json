@@ -97,19 +97,6 @@
         }
       }
     },
-    "/clear": {
-      "post": {
-        "tags": ["chat"],
-        "summary": "Wipe the conversation",
-        "operationId": "clearConversation",
-        "responses": {
-          "204": { "description": "Conversation cleared" },
-          "401": { "$ref": "#/components/responses/Unauthorized" },
-          "409": { "$ref": "#/components/responses/Busy" },
-          "500": { "$ref": "#/components/responses/ServerError" }
-        }
-      }
-    },
     "/transcribe": {
       "post": {
         "tags": ["chat"],

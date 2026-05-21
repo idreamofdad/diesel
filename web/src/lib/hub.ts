@@ -270,14 +270,6 @@ export function sendMessage(text: string) {
   }).catch(() => { /* status row already shows ✗ from connect failure */ });
 }
 
-export function clearConversation() {
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({ type: 'clear' }));
-    return;
-  }
-  fetch('/api/v1/clear', { method: 'POST', headers: authHeaders() }).catch(() => {});
-}
-
 export async function uploadAudio(blob: Blob, filename: string) {
   const form = new FormData();
   form.append('file', blob, filename);

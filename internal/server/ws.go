@@ -150,8 +150,6 @@ func (m *Manager) readLoop(ctx context.Context, conn *websocket.Conn, clientID s
 					_ = err
 				}
 			}
-		case "clear":
-			_ = m.hub.Clear(ctx)
 		case "ping":
 			// Application-level ping the client may send; the response
 			// is implicit via the heartbeat. Nothing to do.

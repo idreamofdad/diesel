@@ -235,7 +235,6 @@ func (m *Manager) buildRouter(token string) *gin.Engine {
 	api.Use(authMiddleware(token))
 	api.GET("/state", m.handleState)
 	api.POST("/send", m.handleSend)
-	api.POST("/clear", m.handleClear)
 	api.POST("/transcribe", m.handleTranscribe)
 	api.GET("/portrait/:id", m.handlePortrait)
 	api.GET("/portrait-preview/:id", m.handlePortraitPreview)
@@ -426,19 +425,6 @@ func (m *Manager) handleSend(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusAccepted, gin.H{"ok": true})
-}
-
-// handleClear wipes the conversation.
-func (m *Manager) handleClear(c *gin.Context) {
-	if err := m.hub.Clear(c.Request.Context()); err != nil {
-		if errors.Is(err, hub.ErrBusy) {
-			c.JSON(http.StatusConflict, gin.H{"error": "busy"})
-			return
-		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-	c.Status(http.StatusNoContent)
 }
 
 // handleTranscribe accepts a multipart upload from the browser's

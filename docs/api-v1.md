@@ -56,10 +56,6 @@ Post a user message. Body:
 Responses: `202` `{"ok":true}` on accept, `400` on empty text, `409`
 `{"error":"busy"}` when another turn is in flight.
 
-### `POST /clear`
-
-Wipes the conversation. `204` on success, `409` while a turn is in flight.
-
 ### `POST /transcribe`
 
 Multipart upload for voice input. Form fields: `file` (audio blob) and
