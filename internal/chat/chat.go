@@ -324,12 +324,15 @@ func Completion(ctx context.Context, s settings.AppSettings, history []Message) 
 	content = leadingTimestamp.ReplaceAllString(content, "")
 
 	// Parse the structured reply. The schema is strict, so a healthy LM
-	// Studio / OpenAI response is valid JSON; on anything else (provider
-	// ignored response_format, model refused, content includes prose
-	// around the JSON) we surface the raw text with a neutral emotion so
-	// the chat keeps flowing.
+	// Studio / OpenAI response is valid JSON — trust it whenever it
+	// unmarshals, even when text is empty: an empty-text reply means the
+	// model legitimately chose to say nothing, and treating that as a
+	// parse failure would dump the raw `{"text":"",...}` blob straight
+	// into the transcript. Only a genuine unmarshal error (provider
+	// ignored response_format and returned prose) falls back to raw
+	// content with a neutral emotion so the chat keeps flowing.
 	var parsed Reply
-	if err := json.Unmarshal([]byte(content), &parsed); err != nil || parsed.Text == "" {
+	if err := json.Unmarshal([]byte(content), &parsed); err != nil {
 		span.SetAttributes(
 			attribute.Bool("llm.structured_reply", false),
 			attribute.Int("llm.reply.length", len(content)),
