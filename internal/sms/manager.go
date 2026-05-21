@@ -110,11 +110,11 @@ func (c config) equal(o config) bool {
 func (c config) validate() error {
 	switch {
 	case c.sid == "":
-		return errors.New("Account SID is empty")
+		return errors.New("account SID is empty")
 	case c.token == "":
-		return errors.New("Auth Token is empty")
+		return errors.New("auth token is empty")
 	case c.from == "":
-		return errors.New("From number is empty")
+		return errors.New("from number is empty")
 	case len(c.allowed) == 0:
 		return errors.New("no allowed numbers configured")
 	}
