@@ -183,7 +183,7 @@ func (c *Client) fetchPage(ctx context.Context, endpoint string) ([]Message, str
 	if err != nil {
 		return nil, "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return nil, "", util.HTTPStatusError(resp, 512)
 	}
@@ -224,7 +224,7 @@ func (c *Client) Send(ctx context.Context, from, to, body string) (Message, erro
 	if err != nil {
 		return Message{}, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	// Twilio returns 201 on create. Anything else is a failure.
 	if resp.StatusCode/100 != 2 {
 		return Message{}, util.HTTPStatusError(resp, 512)
@@ -255,7 +255,7 @@ func (c *Client) Fetch(ctx context.Context, sid string) (Message, error) {
 	if err != nil {
 		return Message{}, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return Message{}, util.HTTPStatusError(resp, 512)
 	}
@@ -284,7 +284,7 @@ func (c *Client) Ping(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return util.HTTPStatusError(resp, 512)
 	}

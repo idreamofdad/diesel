@@ -285,7 +285,7 @@ func Completion(ctx context.Context, s settings.AppSettings, history []Message) 
 		span.SetStatus(codes.Error, err.Error())
 		return Reply{}, Usage{}, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		err := util.HTTPStatusError(resp, 512)

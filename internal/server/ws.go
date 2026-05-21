@@ -53,7 +53,7 @@ func (m *Manager) handleWS(c *gin.Context) {
 	if err != nil {
 		return
 	}
-	defer conn.Close(websocket.StatusInternalError, "")
+	defer func() { _ = conn.Close(websocket.StatusInternalError, "") }()
 
 	// Client identifies itself via query string so reconnects can keep
 	// their identity stable (which matters for last-active TTS routing).
