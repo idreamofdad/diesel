@@ -226,36 +226,39 @@ func TestCompletion_HistoryAssembly(t *testing.T) {
 		wantRoles    []string // includes system if present
 		wantLastUser string
 	}{
+		// The trailing RoleSystem after the date (and optional prompt) is
+		// the state-of-dress reminder — `full` has assistant turns, so
+		// lastNaked always emits it.
 		{
 			name:         "no history sends only the latest user turn",
 			history:      0,
-			wantRoles:    []string{RoleSystem, RoleUser},
+			wantRoles:    []string{RoleSystem, RoleSystem, RoleUser},
 			wantLastUser: "u3",
 		},
 		{
 			name:         "history cap larger than transcript sends everything",
 			history:      99,
-			wantRoles:    []string{RoleSystem, RoleUser, RoleAssistant, RoleUser, RoleAssistant, RoleUser},
+			wantRoles:    []string{RoleSystem, RoleSystem, RoleUser, RoleAssistant, RoleUser, RoleAssistant, RoleUser},
 			wantLastUser: "u3",
 		},
 		{
 			name:         "history cap of 3 sends the last 3 messages",
 			history:      3,
-			wantRoles:    []string{RoleSystem, RoleUser, RoleAssistant, RoleUser},
+			wantRoles:    []string{RoleSystem, RoleSystem, RoleUser, RoleAssistant, RoleUser},
 			wantLastUser: "u3",
 		},
 		{
 			name:         "system prompt is prepended",
 			history:      99,
 			systemPrompt: "you are diesel",
-			wantRoles:    []string{RoleSystem, RoleSystem, RoleUser, RoleAssistant, RoleUser, RoleAssistant, RoleUser},
+			wantRoles:    []string{RoleSystem, RoleSystem, RoleSystem, RoleUser, RoleAssistant, RoleUser, RoleAssistant, RoleUser},
 			wantLastUser: "u3",
 		},
 		{
 			name:         "system prompt with whitespace-only is dropped",
 			history:      99,
 			systemPrompt: "   \n  ",
-			wantRoles:    []string{RoleSystem, RoleUser, RoleAssistant, RoleUser, RoleAssistant, RoleUser},
+			wantRoles:    []string{RoleSystem, RoleSystem, RoleUser, RoleAssistant, RoleUser, RoleAssistant, RoleUser},
 			wantLastUser: "u3",
 		},
 	}
@@ -356,6 +359,79 @@ func TestCompletion_LastEmotionSystemMessage(t *testing.T) {
 		for _, m := range req.Messages {
 			if m.Role == RoleAssistant {
 				assert.Empty(t, m.Emotion, "emotion must not ride on the wire assistant turn")
+			}
+		}
+	})
+
+	t.Run("prior assistant nudity state is fed back as a system message", func(t *testing.T) {
+		srv, req := stubChatServer(t, 200, jsonChoice(`{"text":"ok","emotion":"neutral"}`, Usage{}))
+		_, _, err := Completion(context.Background(),
+			settings.AppSettings{APIEndpoint: srv.URL, Model: "m", HistoryMessages: 99},
+			[]Message{
+				{Role: RoleUser, Content: "u1"},
+				{Role: RoleAssistant, Content: "a1", Naked: true},
+				{Role: RoleUser, Content: "u2"},
+			},
+		)
+		require.NoError(t, err)
+		var found bool
+		for _, m := range req.Messages {
+			if m.Role == RoleSystem && strings.Contains(m.Content, "state of dress") {
+				found = true
+				assert.Contains(t, m.Content, "nude")
+			}
+		}
+		assert.True(t, found, "expected a system message naming the last state of dress")
+	})
+
+	t.Run("clothed prior turn reports clothed, not nude", func(t *testing.T) {
+		srv, req := stubChatServer(t, 200, jsonChoice(`{"text":"ok","emotion":"neutral"}`, Usage{}))
+		_, _, err := Completion(context.Background(),
+			settings.AppSettings{APIEndpoint: srv.URL, Model: "m", HistoryMessages: 99},
+			[]Message{
+				{Role: RoleUser, Content: "u1"},
+				{Role: RoleAssistant, Content: "a1", Naked: false},
+				{Role: RoleUser, Content: "u2"},
+			},
+		)
+		require.NoError(t, err)
+		var dressMsgs []string
+		for _, m := range req.Messages {
+			if m.Role == RoleSystem && strings.Contains(m.Content, "state of dress") {
+				dressMsgs = append(dressMsgs, m.Content)
+			}
+		}
+		require.Len(t, dressMsgs, 1)
+		assert.Contains(t, dressMsgs[0], "clothed")
+		assert.NotContains(t, dressMsgs[0], "nude")
+	})
+
+	t.Run("no assistant turn yet means no state-of-dress system message", func(t *testing.T) {
+		srv, req := stubChatServer(t, 200, jsonChoice(`{"text":"ok","emotion":"neutral"}`, Usage{}))
+		_, _, err := Completion(context.Background(),
+			settings.AppSettings{APIEndpoint: srv.URL, Model: "m"},
+			[]Message{{Role: RoleUser, Content: "hi"}},
+		)
+		require.NoError(t, err)
+		for _, m := range req.Messages {
+			assert.NotContains(t, m.Content, "state of dress")
+		}
+	})
+
+	t.Run("naked flag is stripped from the assistant turn on the wire", func(t *testing.T) {
+		srv, req := stubChatServer(t, 200, jsonChoice(`{"text":"ok","emotion":"neutral"}`, Usage{}))
+		_, _, err := Completion(context.Background(),
+			settings.AppSettings{APIEndpoint: srv.URL, Model: "m", HistoryMessages: 99},
+			[]Message{
+				{Role: RoleUser, Content: "u1"},
+				{Role: RoleAssistant, Content: "a1", Naked: true},
+				{Role: RoleUser, Content: "u2"},
+			},
+		)
+		require.NoError(t, err)
+		for _, m := range req.Messages {
+			if m.Role == RoleAssistant {
+				assert.False(t, m.Naked, "naked flag must not ride on the wire assistant turn")
 			}
 		}
 	})
