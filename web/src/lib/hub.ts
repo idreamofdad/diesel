@@ -1,7 +1,7 @@
 // hub.ts is the client-side mirror of the Go hub. It owns the WebSocket
 // connection, the reactive state stores, and the helpers that send
 // commands or fetch media. Components import the stores directly and
-// call sendMessage / clearConversation / fetchAudio to interact.
+// call sendMessage / fetchAudio to interact.
 //
 // Reconnect: the WS reconnects with exponential backoff (1s → 30s)
 // whenever it drops. Reconnects reuse the same client_id so the hub
@@ -103,7 +103,7 @@ function wsURL(): string {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   const token = get(authToken);
   const tokenParam = token ? `&token=${encodeURIComponent(token)}` : '';
-  return `${proto}://${location.host}/api/ws?client_id=${encodeURIComponent(getClientID())}${tokenParam}`;
+  return `${proto}://${location.host}/api/v1/ws?client_id=${encodeURIComponent(getClientID())}${tokenParam}`;
 }
 
 export async function connect(): Promise<void> {
@@ -112,7 +112,7 @@ export async function connect(): Promise<void> {
   // status/in_flight; transcript history doesn't change between this
   // fetch and the next event because the hub serializes turns.
   try {
-    const resp = await fetch('/api/state', {
+    const resp = await fetch('/api/v1/state', {
       headers: authHeaders(),
     });
     if (resp.ok) {
@@ -263,26 +263,18 @@ export function sendMessage(text: string) {
   }
   // WS down — fall back to REST so the user can still send while
   // reconnecting.
-  fetch('/api/send', {
+  fetch('/api/v1/send', {
     method: 'POST',
     headers: { ...authHeaders(), 'Content-Type': 'application/json' },
     body: JSON.stringify({ text, origin: getClientID() }),
   }).catch(() => { /* status row already shows ✗ from connect failure */ });
 }
 
-export function clearConversation() {
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({ type: 'clear' }));
-    return;
-  }
-  fetch('/api/clear', { method: 'POST', headers: authHeaders() }).catch(() => {});
-}
-
 export async function uploadAudio(blob: Blob, filename: string) {
   const form = new FormData();
   form.append('file', blob, filename);
   form.append('origin', getClientID());
-  const resp = await fetch('/api/transcribe', {
+  const resp = await fetch('/api/v1/transcribe', {
     method: 'POST',
     headers: authHeaders(),
     body: form,
@@ -304,7 +296,7 @@ export function getClientId(): string {
 }
 
 // ─── Settings API ──────────────────────────────────────────────────────
-// Thin wrappers over the /api/settings routes. Mirrors the AppSettings
+// Thin wrappers over the /api/v1/settings routes. Mirrors the AppSettings
 // struct on the Go side (internal/settings/settings.go) — keep field
 // names in sync with the JSON tags there. Secrets come back as the
 // sentinel "********"; sending the same sentinel back means "leave the
@@ -346,13 +338,13 @@ export interface AppSettings {
 }
 
 export async function fetchSettings(): Promise<AppSettings> {
-  const resp = await fetch('/api/settings', { headers: authHeaders() });
+  const resp = await fetch('/api/v1/settings', { headers: authHeaders() });
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
   return resp.json();
 }
 
 export async function saveSettings(s: AppSettings): Promise<AppSettings> {
-  const resp = await fetch('/api/settings', {
+  const resp = await fetch('/api/v1/settings', {
     method: 'POST',
     headers: { ...authHeaders(), 'Content-Type': 'application/json' },
     body: JSON.stringify(s),
@@ -374,7 +366,7 @@ export interface ProbeBody {
 }
 
 export async function probeModels(body: ProbeBody): Promise<{ models: string[]; context_length?: number; error?: string }> {
-  const resp = await fetch('/api/settings/models', {
+  const resp = await fetch('/api/v1/settings/models', {
     method: 'POST',
     headers: { ...authHeaders(), 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -384,7 +376,7 @@ export async function probeModels(body: ProbeBody): Promise<{ models: string[]; 
 }
 
 export async function testConnection(body: ProbeBody): Promise<string> {
-  const resp = await fetch('/api/settings/test', {
+  const resp = await fetch('/api/v1/settings/test', {
     method: 'POST',
     headers: { ...authHeaders(), 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -398,7 +390,7 @@ export async function testConnection(body: ProbeBody): Promise<string> {
 // throws with the server's error message). The caller is responsible
 // for playing the blob and revoking its ObjectURL when done.
 export async function testTTS(body: ProbeBody): Promise<Blob> {
-  const resp = await fetch('/api/settings/test-tts', {
+  const resp = await fetch('/api/v1/settings/test-tts', {
     method: 'POST',
     headers: { ...authHeaders(), 'Content-Type': 'application/json' },
     body: JSON.stringify(body),

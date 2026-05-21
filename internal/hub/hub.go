@@ -118,10 +118,10 @@ type Event struct {
 	// Emotion and Naked are extracted from the structured reply.
 	Emotion string `json:"emotion,omitempty"`
 	Naked   bool   `json:"naked,omitempty"`
-	// PortraitURL is "/api/portrait/<id>"; set on EventTurnComplete when
+	// PortraitURL is "/api/v1/portrait/<id>"; set on EventTurnComplete when
 	// image generation produced something. Broadcast to every subscriber.
 	PortraitURL string `json:"portrait_url,omitempty"`
-	// AudioURL is "/api/audio/<id>"; set on EventTurnComplete when TTS
+	// AudioURL is "/api/v1/audio/<id>"; set on EventTurnComplete when TTS
 	// synthesis succeeded. Broadcast to every subscriber, but Origin
 	// determines who should actually fetch+play it.
 	AudioURL string      `json:"audio_url,omitempty"`
@@ -162,14 +162,6 @@ const mediaCacheSize = 8
 // recent frame after a backlog.
 const previewCacheSize = 64
 
-// telegramOriginPrefix marks turns that arrived over the Telegram bridge
-// (origins look like "telegram:<chat_id>"). Those render a landscape
-// portrait — Telegram displays photos wide — while every other origin
-// keeps the workflow's portrait dimensions. Duplicated here as a literal
-// rather than imported from internal/telegram, which imports this
-// package: importing it back would create a cycle.
-const telegramOriginPrefix = "telegram:"
-
 // Hub owns the conversation. Construct with New(), then call Start once
 // at boot to load any persisted history and Stop at shutdown.
 type Hub struct {
@@ -199,7 +191,7 @@ func New() *Hub {
 }
 
 // Start loads persisted history from disk when SaveToDisk is enabled and
-// seeds the most-recent portrait into the cache so the first /api/portrait
+// seeds the most-recent portrait into the cache so the first /api/v1/portrait
 // fetch hits something.
 func (h *Hub) Start(ctx context.Context) {
 	s := settings.Load()
@@ -347,8 +339,10 @@ func (h *Hub) Clear(ctx context.Context) error {
 // which case the caller's UI should stay locked until EventTurnComplete
 // (or EventTurnError) arrives. `origin` identifies the subscriber that
 // initiated the turn — used for last-active TTS routing and surfaced in
-// the broadcast events.
-func (h *Hub) Send(ctx context.Context, text, origin string) error {
+// the broadcast events. `landscape` selects the portrait's orientation:
+// true transposes the workflow's Width/Height for a wide image (what the
+// Telegram bridge wants), false keeps the baked portrait dimensions.
+func (h *Hub) Send(ctx context.Context, text, origin string, landscape bool) error {
 	if text == "" {
 		return errors.New("empty message")
 	}
@@ -390,7 +384,7 @@ func (h *Hub) Send(ctx context.Context, text, origin string) error {
 	// turn pipeline genuinely outlives the originating request, so
 	// we keep the context's values (tracing span lineage) but drop
 	// the deadline/cancel.
-	go h.runTurn(context.WithoutCancel(ctx), s, snapshot, origin, turnID)
+	go h.runTurn(context.WithoutCancel(ctx), s, snapshot, origin, turnID, landscape)
 	return nil
 }
 
@@ -401,7 +395,7 @@ func (h *Hub) Send(ctx context.Context, text, origin string) error {
 // don't have to coalesce intermediate states). Failure of TTS or portrait
 // does not fail the turn; only the chat-completion error path emits
 // EventTurnError.
-func (h *Hub) runTurn(ctx context.Context, s settings.AppSettings, snapshot []chat.Message, origin string, turnID int64) {
+func (h *Hub) runTurn(ctx context.Context, s settings.AppSettings, snapshot []chat.Message, origin string, turnID int64, landscape bool) {
 	turnCtx, turnSpan := tracing.StartSpan(ctx, "hub.turn",
 		attribute.String("turn.origin", origin),
 		attribute.Int64("turn.id", turnID),
@@ -435,7 +429,7 @@ func (h *Hub) runTurn(ctx context.Context, s settings.AppSettings, snapshot []ch
 		return
 	}
 
-	assistant := chat.Message{Role: chat.RoleAssistant, Content: reply.Text, Emotion: reply.Emotion, Timestamp: time.Now()}
+	assistant := chat.Message{Role: chat.RoleAssistant, Content: reply.Text, Emotion: reply.Emotion, Naked: reply.Naked, Timestamp: time.Now()}
 	h.mu.Lock()
 	h.history = append(h.history, assistant)
 	hist := append([]chat.Message(nil), h.history...)
@@ -468,7 +462,7 @@ func (h *Hub) runTurn(ctx context.Context, s settings.AppSettings, snapshot []ch
 	// audio for this turn" signal to advance, otherwise they'd wait
 	// forever for a synthesis that's never coming.
 	go h.synthesizeAudio(turnCtx, s, reply, origin, turnID)
-	go h.renderPortrait(turnCtx, s, reply, origin, turnID)
+	go h.renderPortrait(turnCtx, s, reply, turnID, landscape)
 }
 
 // synthesizeAudio runs TTS and broadcasts EventAudioReady when done.
@@ -499,13 +493,13 @@ func (h *Hub) synthesizeAudio(ctx context.Context, s settings.AppSettings, reply
 	h.mu.Lock()
 	h.audio.put(id, data)
 	h.mu.Unlock()
-	ev.AudioURL = "/api/audio/" + id
+	ev.AudioURL = "/api/v1/audio/" + id
 }
 
 // renderPortrait runs ComfyUI image generation and broadcasts
 // EventPortraitReady when done — same always-broadcast contract as
 // synthesizeAudio. Empty PortraitURL = "no portrait for this turn".
-func (h *Hub) renderPortrait(ctx context.Context, s settings.AppSettings, reply chat.Reply, origin string, turnID int64) {
+func (h *Hub) renderPortrait(ctx context.Context, s settings.AppSettings, reply chat.Reply, turnID int64, landscape bool) {
 	ev := Event{
 		Type:      EventPortraitReady,
 		TurnID:    turnID,
@@ -544,11 +538,10 @@ func (h *Hub) renderPortrait(ctx context.Context, s settings.AppSettings, reply 
 			h.mu.Lock()
 			h.previews.put(id, p.Preview)
 			h.mu.Unlock()
-			ev.PortraitURL = "/api/portrait-preview/" + id
+			ev.PortraitURL = "/api/v1/portrait-preview/" + id
 		}
 		h.broadcast(ev)
 	}
-	landscape := strings.HasPrefix(origin, telegramOriginPrefix)
 	png, err := comfyui.Generate(ctx, s, prompt, s.ImageNegativePrompt, reply.Naked, landscape, onProgress)
 	if err != nil || len(png) == 0 {
 		return
@@ -558,7 +551,7 @@ func (h *Hub) renderPortrait(ctx context.Context, s settings.AppSettings, reply 
 	h.mu.Lock()
 	h.portraits.put(id, png)
 	h.mu.Unlock()
-	ev.PortraitURL = "/api/portrait/" + id
+	ev.PortraitURL = "/api/v1/portrait/" + id
 }
 
 // composeImagePrompt assembles the image prompt the same way the

@@ -54,15 +54,15 @@ func TestConfig_Validate(t *testing.T) {
 
 	c := full
 	c.sid = ""
-	assert.ErrorContains(t, c.validate(), "Account SID")
+	assert.ErrorContains(t, c.validate(), "account SID")
 
 	c = full
 	c.token = ""
-	assert.ErrorContains(t, c.validate(), "Auth Token")
+	assert.ErrorContains(t, c.validate(), "auth token")
 
 	c = full
 	c.from = ""
-	assert.ErrorContains(t, c.validate(), "From number")
+	assert.ErrorContains(t, c.validate(), "from number")
 
 	c = full
 	c.allowed = nil

@@ -29,7 +29,7 @@ func TestAuthMiddleware_NoTokenAllows(t *testing.T) {
 	r := m.buildRouter("")
 
 	w := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/state", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/state", nil)
 	r.ServeHTTP(w, req)
 	assert.Equal(t, http.StatusOK, w.Code)
 }
@@ -55,7 +55,7 @@ func TestAuthMiddleware_TokenEnforced(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			w := httptest.NewRecorder()
-			req := httptest.NewRequest(http.MethodGet, "/api/state", nil)
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/state", nil)
 			tc.mod(req)
 			r.ServeHTTP(w, req)
 			assert.Equal(t, tc.want, w.Code)
@@ -85,7 +85,7 @@ func TestHandleSend_Busy(t *testing.T) {
 	// Send once; expect 202 (accepted) or some flavor of accepted.
 	body := `{"text":"hello","origin":"test"}`
 	w1 := httptest.NewRecorder()
-	req1 := httptest.NewRequest(http.MethodPost, "/api/send", strings.NewReader(body))
+	req1 := httptest.NewRequest(http.MethodPost, "/api/v1/send", strings.NewReader(body))
 	req1.Header.Set("Content-Type", "application/json")
 	r.ServeHTTP(w1, req1)
 	// The hub's Send synchronously sets inFlight before returning.
@@ -93,7 +93,7 @@ func TestHandleSend_Busy(t *testing.T) {
 
 	// Second send before the goroutine completes — busy.
 	w2 := httptest.NewRecorder()
-	req2 := httptest.NewRequest(http.MethodPost, "/api/send", strings.NewReader(body))
+	req2 := httptest.NewRequest(http.MethodPost, "/api/v1/send", strings.NewReader(body))
 	req2.Header.Set("Content-Type", "application/json")
 	r.ServeHTTP(w2, req2)
 	assert.Equal(t, http.StatusConflict, w2.Code)
@@ -160,7 +160,7 @@ func TestHandleState_ReturnsHistory(t *testing.T) {
 	r := m.buildRouter("")
 
 	w := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/state", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/state", nil)
 	r.ServeHTTP(w, req)
 	require.Equal(t, http.StatusOK, w.Code)
 
@@ -189,10 +189,10 @@ func TestManager_Apply_StartStop(t *testing.T) {
 	// Hit the server to confirm it's actually listening.
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://127.0.0.1:"+itoa(port)+"/api/state", nil)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://127.0.0.1:"+itoa(port)+"/api/v1/state", nil)
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
-	resp.Body.Close()
+	require.NoError(t, resp.Body.Close())
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 
 	// Apply disabled — server should stop.
@@ -202,7 +202,7 @@ func TestManager_Apply_StartStop(t *testing.T) {
 	// Now confirm the port is free.
 	ln2, err := net.Listen("tcp", "127.0.0.1:"+itoa(port))
 	require.NoError(t, err, "port should be released after Apply(disabled)")
-	ln2.Close()
+	require.NoError(t, ln2.Close())
 }
 
 // TestManager_Apply_BindFailureKeepsPriorRunning — a failed bind on
@@ -217,7 +217,7 @@ func TestManager_Apply_BindFailureKeepsPriorRunning(t *testing.T) {
 	// Grab another port and hold it so the second Apply collides.
 	blocker, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
-	defer blocker.Close()
+	defer func() { _ = blocker.Close() }()
 	badPort := blocker.Addr().(*net.TCPAddr).Port
 
 	h := hub.New()

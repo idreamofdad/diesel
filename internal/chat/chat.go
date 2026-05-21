@@ -66,6 +66,12 @@ type Message struct {
 	// Empty on user/system messages and on assistant turns from older
 	// conversation files saved before this field existed.
 	Emotion string `json:"emotion,omitempty"`
+	// Naked is the nudity flag the model raised on an assistant turn.
+	// Stored alongside Emotion so the next request can remind the model
+	// of its previous state of dress — see lastNaked. Always false on
+	// user/system messages and on assistant turns from older conversation
+	// files saved before this field existed.
+	Naked bool `json:"naked,omitempty"`
 }
 
 // thinkBlock matches the <think>…</think> reasoning blocks some OSS models
@@ -146,6 +152,19 @@ func lastEmotion(history []Message) string {
 	return ""
 }
 
+// lastNaked returns the Naked flag of the most recent assistant message in
+// `history`. The second return is false when the conversation has no
+// assistant turn yet, so the caller can tell "clothed" apart from "no prior
+// turn". Used to feed the model its own previous state of dress.
+func lastNaked(history []Message) (bool, bool) {
+	for i := len(history) - 1; i >= 0; i-- {
+		if history[i].Role == RoleAssistant {
+			return history[i].Naked, true
+		}
+	}
+	return false, false
+}
+
 // Completion sends `history` (oldest→newest) to the configured endpoint
 // and returns the assistant's structured reply along with the server-
 // reported token usage (zero-valued struct when the server didn't include
@@ -197,6 +216,19 @@ func Completion(ctx context.Context, s settings.AppSettings, history []Message) 
 			Content: "Your facial expression in your previous reply was: " + e,
 		})
 	}
+	// Likewise remind the model of its previous state of dress so the
+	// nudity flag has turn-to-turn continuity. Skipped on the first turn,
+	// where there's no prior assistant reply.
+	if naked, ok := lastNaked(history); ok {
+		state := "clothed"
+		if naked {
+			state = "nude"
+		}
+		msgs = append(msgs, Message{
+			Role:    RoleSystem,
+			Content: "Your state of dress in your previous reply was: " + state,
+		})
+	}
 	start := 0
 	switch {
 	case s.HistoryMessages <= 0:
@@ -213,10 +245,12 @@ func Completion(ctx context.Context, s settings.AppSettings, history []Message) 
 			m.Content = "[" + m.Timestamp.Format("2006-01-02 15:04:05 MST") + "] " + m.Content
 			m.Timestamp = time.Time{}
 		}
-		// Emotion is internal bookkeeping — strip it so the wire body
-		// stays a plain role/content pair. The model's prior expression
-		// is fed back via the system message above, not on the turn.
+		// Emotion and Naked are internal bookkeeping — strip them so the
+		// wire body stays a plain role/content pair. The model's prior
+		// expression and state of dress are fed back via the system
+		// messages above, not on the turn.
 		m.Emotion = ""
+		m.Naked = false
 		msgs = append(msgs, m)
 	}
 
@@ -285,7 +319,7 @@ func Completion(ctx context.Context, s settings.AppSettings, history []Message) 
 		span.SetStatus(codes.Error, err.Error())
 		return Reply{}, Usage{}, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		err := util.HTTPStatusError(resp, 512)
@@ -324,12 +358,15 @@ func Completion(ctx context.Context, s settings.AppSettings, history []Message) 
 	content = leadingTimestamp.ReplaceAllString(content, "")
 
 	// Parse the structured reply. The schema is strict, so a healthy LM
-	// Studio / OpenAI response is valid JSON; on anything else (provider
-	// ignored response_format, model refused, content includes prose
-	// around the JSON) we surface the raw text with a neutral emotion so
-	// the chat keeps flowing.
+	// Studio / OpenAI response is valid JSON — trust it whenever it
+	// unmarshals, even when text is empty: an empty-text reply means the
+	// model legitimately chose to say nothing, and treating that as a
+	// parse failure would dump the raw `{"text":"",...}` blob straight
+	// into the transcript. Only a genuine unmarshal error (provider
+	// ignored response_format and returned prose) falls back to raw
+	// content with a neutral emotion so the chat keeps flowing.
 	var parsed Reply
-	if err := json.Unmarshal([]byte(content), &parsed); err != nil || parsed.Text == "" {
+	if err := json.Unmarshal([]byte(content), &parsed); err != nil {
 		span.SetAttributes(
 			attribute.Bool("llm.structured_reply", false),
 			attribute.Int("llm.reply.length", len(content)),

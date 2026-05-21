@@ -274,7 +274,7 @@ func modelsRequest(endpoint, authHeader, apiKey, anthropicVersion string) ([]mod
 	if err != nil {
 		return nil, 0, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return nil, resp.StatusCode, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
@@ -410,7 +410,7 @@ func nativeProbeGET(url, apiKey string, out any) bool {
 	if err != nil {
 		return false
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return false
 	}
@@ -476,7 +476,7 @@ func ollamaContextLength(base, apiKey, modelID string) int {
 	if err != nil {
 		return 0
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return 0
 	}

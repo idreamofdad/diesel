@@ -11,6 +11,7 @@ package server
 
 import (
 	"context"
+	_ "embed"
 	"errors"
 	"fmt"
 	"io"
@@ -28,6 +29,13 @@ import (
 
 	"github.com/gin-gonic/gin"
 )
+
+// openAPISpec is the OpenAPI 3.1 description of the /api/v1 surface,
+// served verbatim at /openapi.json so external clients can generate
+// bindings against it.
+//
+//go:embed openapi.json
+var openAPISpec []byte
 
 // Manager owns the HTTP server and reacts to settings changes. The zero
 // value is unusable; construct with New.
@@ -159,11 +167,17 @@ func (m *Manager) Apply(s settings.AppSettings) string {
 		}
 	}()
 
-	bindURL := fmt.Sprintf("http://%s:%d", host, cfg.port)
+	bindURL := fmt.Sprintf("http://127.0.0.1:%d", cfg.port)
 	if cfg.expose {
-		// On 0.0.0.0 it's more useful to print loopback in the status
-		// — the user usually wants to copy a URL they can hit.
-		bindURL = fmt.Sprintf("http://127.0.0.1:%d (also LAN)", cfg.port)
+		// Bound to 0.0.0.0, but loopback isn't reachable from other
+		// machines — show the LAN IP so the status is a URL the user
+		// can actually copy onto another device. Fall back to loopback
+		// if no LAN address can be determined (e.g. offline host).
+		if ip := lanIP(); ip != "" {
+			bindURL = fmt.Sprintf("http://%s:%d", ip, cfg.port)
+		} else {
+			bindURL = fmt.Sprintf("http://127.0.0.1:%d (also LAN)", cfg.port)
+		}
 	}
 	m.mu.Lock()
 	m.srv = newSrv
@@ -173,6 +187,22 @@ func (m *Manager) Apply(s settings.AppSettings) string {
 	st := m.status
 	m.mu.Unlock()
 	return st
+}
+
+// lanIP reports the host's primary LAN IPv4 address by inspecting the
+// local end of a UDP socket "connected" to an off-host address. No
+// packets are sent — this just asks the routing table which interface
+// would carry outbound traffic. Returns "" if it can't be determined.
+func lanIP() string {
+	conn, err := net.Dial("udp", "8.8.8.8:80")
+	if err != nil {
+		return ""
+	}
+	defer func() { _ = conn.Close() }()
+	if addr, ok := conn.LocalAddr().(*net.UDPAddr); ok {
+		return addr.IP.String()
+	}
+	return ""
 }
 
 // Stop shuts the server down for good. Safe to call from any goroutine
@@ -223,11 +253,10 @@ func (m *Manager) buildRouter(token string) *gin.Engine {
 		c.Next()
 	})
 
-	api := r.Group("/api")
+	api := r.Group("/api/v1")
 	api.Use(authMiddleware(token))
 	api.GET("/state", m.handleState)
 	api.POST("/send", m.handleSend)
-	api.POST("/clear", m.handleClear)
 	api.POST("/transcribe", m.handleTranscribe)
 	api.GET("/portrait/:id", m.handlePortrait)
 	api.GET("/portrait-preview/:id", m.handlePortraitPreview)
@@ -238,6 +267,13 @@ func (m *Manager) buildRouter(token string) *gin.Engine {
 	api.POST("/settings/models", m.handleSettingsModels)
 	api.POST("/settings/test", m.handleSettingsTest)
 	api.POST("/settings/test-tts", m.handleSettingsTestTTS)
+
+	// The API description is served unauthenticated off the root so a
+	// client can discover the surface (and the auth scheme) before it
+	// has a token.
+	r.GET("/openapi.json", func(c *gin.Context) {
+		c.Data(http.StatusOK, "application/json; charset=utf-8", openAPISpec)
+	})
 
 	// Static UI: serve the embedded SPA off /. The file server is wired
 	// up only when the embed actually contains an index.html — fresh
@@ -377,9 +413,24 @@ func (m *Manager) handleState(c *gin.Context) {
 		"status":    m.hub.LastStatus(),
 	}
 	if id, png := m.hub.LatestPortrait(); id != "" && len(png) > 0 {
-		resp["portrait_url"] = "/api/portrait/" + id
+		resp["portrait_url"] = "/api/v1/portrait/" + id
 	}
 	c.JSON(http.StatusOK, resp)
+}
+
+// orientationLandscape maps the API's "orientation" field to the hub's
+// landscape flag. Blank or "portrait" keeps the workflow's portrait
+// dimensions; "landscape" transposes them. valid is false for any other
+// value so callers can reject a typo.
+func orientationLandscape(s string) (landscape, valid bool) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", "portrait":
+		return false, true
+	case "landscape":
+		return true, true
+	default:
+		return false, false
+	}
 }
 
 // handleSend posts a user message into the hub. Returns 409 when
@@ -387,8 +438,9 @@ func (m *Manager) handleState(c *gin.Context) {
 // turn_complete event before re-enabling its Send button.
 func (m *Manager) handleSend(c *gin.Context) {
 	var body struct {
-		Text   string `json:"text"`
-		Origin string `json:"origin"`
+		Text        string `json:"text"`
+		Origin      string `json:"origin"`
+		Orientation string `json:"orientation"`
 	}
 	if err := c.BindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -402,7 +454,12 @@ func (m *Manager) handleSend(c *gin.Context) {
 	if body.Origin == "" {
 		body.Origin = "anonymous"
 	}
-	if err := m.hub.Send(c.Request.Context(), body.Text, body.Origin); err != nil {
+	landscape, ok := orientationLandscape(body.Orientation)
+	if !ok {
+		c.JSON(http.StatusBadRequest, gin.H{"error": `orientation must be "portrait" or "landscape"`})
+		return
+	}
+	if err := m.hub.Send(c.Request.Context(), body.Text, body.Origin, landscape); err != nil {
 		if errors.Is(err, hub.ErrBusy) {
 			c.JSON(http.StatusConflict, gin.H{"error": "busy"})
 			return
@@ -413,29 +470,22 @@ func (m *Manager) handleSend(c *gin.Context) {
 	c.JSON(http.StatusAccepted, gin.H{"ok": true})
 }
 
-// handleClear wipes the conversation.
-func (m *Manager) handleClear(c *gin.Context) {
-	if err := m.hub.Clear(c.Request.Context()); err != nil {
-		if errors.Is(err, hub.ErrBusy) {
-			c.JSON(http.StatusConflict, gin.H{"error": "busy"})
-			return
-		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-	c.Status(http.StatusNoContent)
-}
-
 // handleTranscribe accepts a multipart upload from the browser's
 // MediaRecorder / Silero VAD output, forwards it to the configured STT
 // endpoint as-is (OpenAI-compatible servers accept the codecs browsers
 // produce), and on success pumps the recognized text into the hub as
 // if the originating client had sent it via /send. The 'origin' form
-// field carries the subscriber ID so TTS routing still works.
+// field carries the subscriber ID so TTS routing still works; the
+// optional 'orientation' field picks the portrait orientation.
 func (m *Manager) handleTranscribe(c *gin.Context) {
 	origin := c.PostForm("origin")
 	if origin == "" {
 		origin = "anonymous"
+	}
+	landscape, ok := orientationLandscape(c.PostForm("orientation"))
+	if !ok {
+		c.JSON(http.StatusBadRequest, gin.H{"error": `orientation must be "portrait" or "landscape"`})
+		return
 	}
 	header, err := c.FormFile("file")
 	if err != nil {
@@ -447,7 +497,7 @@ func (m *Manager) handleTranscribe(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	data, err := io.ReadAll(f)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -470,7 +520,7 @@ func (m *Manager) handleTranscribe(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"text": ""})
 		return
 	}
-	if err := m.hub.Send(c.Request.Context(), text, origin); err != nil {
+	if err := m.hub.Send(c.Request.Context(), text, origin, landscape); err != nil {
 		c.JSON(http.StatusOK, gin.H{"text": text, "send_error": err.Error()})
 		return
 	}

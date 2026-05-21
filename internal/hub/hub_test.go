@@ -96,7 +96,7 @@ func TestSend_DetachesCallerContext(t *testing.T) {
 	sub := h.Subscribe("test")
 
 	ctx, cancel := context.WithCancel(context.Background())
-	require.NoError(t, h.Send(ctx, "hi", "test"))
+	require.NoError(t, h.Send(ctx, "hi", "test", false))
 	// Cancel immediately — mirrors a gin handler returning right
 	// after kicking off the turn.
 	cancel()
@@ -108,10 +108,7 @@ func TestSend_DetachesCallerContext(t *testing.T) {
 	deadline := time.After(3 * time.Second)
 	var sawStarted, sawError bool
 	var errMsg string
-	for {
-		if sawStarted && sawError {
-			break
-		}
+	for !sawStarted || !sawError {
 		select {
 		case ev, ok := <-sub.Events:
 			if !ok {

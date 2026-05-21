@@ -100,7 +100,7 @@ func Synthesize(ctx context.Context, endpoint, apiKey, model, voice, text string
 		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		err := util.HTTPStatusError(resp, 512)
 		span.RecordError(err)

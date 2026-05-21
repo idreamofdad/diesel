@@ -4,7 +4,7 @@
   // and gives us callbacks on speech start/end with the recorded PCM.
   //
   // On stop we wrap the PCM in a WAV (16 kHz mono 16-bit signed int LE
-  // — same format the Go pipeline expects) and POST to /api/transcribe.
+  // — same format the Go pipeline expects) and POST to /api/v1/transcribe.
   // The server forwards to STT, the recognized text becomes a new turn
   // through the hub, and the resulting reply lands like any other.
   //
@@ -26,7 +26,7 @@
   //               back on for every new utterance — without the
   //               onSpeechStart hook the red state would never come
   //               back for subsequent segments.
-  //   busy      — upload to /api/transcribe in flight.
+  //   busy      — upload to /api/v1/transcribe in flight.
   let listening = $state(false);
   let capturing = $state(false);
   let busy = $state(false);

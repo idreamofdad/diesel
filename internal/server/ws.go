@@ -17,15 +17,19 @@ import (
 
 // wsCommand is the shape browser clients send over the WS upstream. The
 // server is mostly broadcast-driven, so commands are short: send a
-// message, clear the conversation, ping the heartbeat.
+// message, ping the heartbeat.
 type wsCommand struct {
 	Type string `json:"type"`
 	Text string `json:"text,omitempty"`
+	// Orientation picks the portrait orientation for a "send" command:
+	// "portrait" (default) or "landscape". An unrecognized value falls
+	// back to portrait — the read loop never rejects a frame.
+	Orientation string `json:"orientation,omitempty"`
 }
 
 // wsAckEvent is the synthetic event the server sends right after upgrade
 // so clients can seed their state (history snapshot, in-flight flag,
-// status string, latest portrait URL) without an additional /api/state
+// status string, latest portrait URL) without an additional /api/v1/state
 // round-trip.
 type wsAckEvent struct {
 	Type        string `json:"type"`
@@ -53,7 +57,7 @@ func (m *Manager) handleWS(c *gin.Context) {
 	if err != nil {
 		return
 	}
-	defer conn.Close(websocket.StatusInternalError, "")
+	defer func() { _ = conn.Close(websocket.StatusInternalError, "") }()
 
 	// Client identifies itself via query string so reconnects can keep
 	// their identity stable (which matters for last-active TTS routing).
@@ -66,7 +70,7 @@ func (m *Manager) handleWS(c *gin.Context) {
 	defer m.hub.Unsubscribe(clientID)
 
 	// Send the initial state so the client can paint without a separate
-	// /api/state fetch. The web client subscribes to this ack frame and
+	// /api/v1/state fetch. The web client subscribes to this ack frame and
 	// requests the full history via REST when it's needed (cheap on
 	// loopback, and keeps the WS frame small).
 	ack := wsAckEvent{
@@ -76,7 +80,7 @@ func (m *Manager) handleWS(c *gin.Context) {
 		InFlight: m.hub.InFlight(),
 	}
 	if id, png := m.hub.LatestPortrait(); id != "" && len(png) > 0 {
-		ack.PortraitURL = "/api/portrait/" + id
+		ack.PortraitURL = "/api/v1/portrait/" + id
 	}
 	if raw, err := json.Marshal(ack); err == nil {
 		_ = conn.Write(c.Request.Context(), websocket.MessageText, raw)
@@ -142,7 +146,8 @@ func (m *Manager) readLoop(ctx context.Context, conn *websocket.Conn, clientID s
 			if text == "" {
 				continue
 			}
-			if err := m.hub.Send(ctx, text, clientID); err != nil {
+			landscape, _ := orientationLandscape(cmd.Orientation)
+			if err := m.hub.Send(ctx, text, clientID, landscape); err != nil {
 				if !errors.Is(err, hub.ErrBusy) {
 					// Non-busy errors aren't expected from Send other
 					// than empty-text guards; surface via the next
@@ -150,8 +155,6 @@ func (m *Manager) readLoop(ctx context.Context, conn *websocket.Conn, clientID s
 					_ = err
 				}
 			}
-		case "clear":
-			_ = m.hub.Clear(ctx)
 		case "ping":
 			// Application-level ping the client may send; the response
 			// is implicit via the heartbeat. Nothing to do.

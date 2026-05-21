@@ -395,7 +395,7 @@ func TranscribeBlob(ctx context.Context, endpoint, apiKey, model, filename, cont
 		span.SetStatus(codes.Error, err.Error())
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		err := util.HTTPStatusError(resp, 512)
 		span.RecordError(err)

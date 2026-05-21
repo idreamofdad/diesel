@@ -140,7 +140,7 @@ func TestHttpStatusError(t *testing.T) {
 
 			resp, err := http.Get(srv.URL)
 			require.NoError(t, err)
-			t.Cleanup(func() { resp.Body.Close() })
+			t.Cleanup(func() { _ = resp.Body.Close() })
 
 			err = HTTPStatusError(resp, tc.snippet)
 			require.Error(t, err)

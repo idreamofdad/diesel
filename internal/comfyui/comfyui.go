@@ -375,7 +375,7 @@ func Generate(ctx context.Context, s settings.AppSettings, positive, negative st
 		span.SetStatus(codes.Error, err.Error())
 		return nil, fmt.Errorf("websocket dial: %w", err)
 	}
-	defer conn.Close(websocket.StatusNormalClosure, "")
+	defer func() { _ = conn.Close(websocket.StatusNormalClosure, "") }()
 	// Preview frames can easily exceed the 32 KB default read limit.
 	conn.SetReadLimit(8 << 20)
 
@@ -551,7 +551,7 @@ func Generate(ctx context.Context, s settings.AppSettings, positive, negative st
 // graph with 400 and a node_errors blob — surfaced here so a bad checkpoint
 // name or missing node fails loudly instead of hanging the poll loop.
 func decodePromptID(resp *http.Response) (string, error) {
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return "", util.HTTPStatusError(resp, 8192)
 	}
@@ -619,7 +619,7 @@ func fetchImage(ctx context.Context, client *http.Client, endpoint string, ref i
 		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		err := fmt.Errorf("view HTTP %d", resp.StatusCode)
 		span.SetStatus(codes.Error, err.Error())
@@ -649,7 +649,7 @@ func FetchCheckpoints(endpoint string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return nil, util.HTTPStatusError(resp, 512)
 	}
@@ -692,7 +692,7 @@ func TestConnection(endpoint string) string {
 	if err != nil {
 		return "✗ " + err.Error()
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Sprintf("✗ HTTP %d", resp.StatusCode)
 	}

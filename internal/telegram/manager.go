@@ -123,7 +123,7 @@ func (c config) equal(o config) bool {
 func (c config) validate() error {
 	switch {
 	case c.token == "":
-		return errors.New("Bot Token is empty")
+		return errors.New("bot token is empty")
 	case c.allowed == "":
 		return errors.New("no allowed username configured")
 	}
@@ -391,7 +391,9 @@ func (m *Manager) dispatchLoop(ctx context.Context, sub *hub.Subscriber, bot *tg
 		for len(queue) > 0 {
 			p := queue[0]
 			origin := originPrefix + strconv.FormatInt(p.chatID, 10)
-			err := m.hub.Send(ctx, p.text, origin)
+			// Telegram displays photos wide, so Telegram-originated
+			// turns always render a landscape portrait.
+			err := m.hub.Send(ctx, p.text, origin, true)
 			if err == nil {
 				queue = queue[1:]
 				return
@@ -561,7 +563,7 @@ func downloadFile(ctx context.Context, url string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return nil, util.HTTPStatusError(resp, 256)
 	}
@@ -617,7 +619,7 @@ func (m *Manager) send(bot *tgbotapi.BotAPI, chatID int64, text string) int {
 // photo's message ID so the caller can delete it when the next portrait
 // replaces it.
 func (m *Manager) sendPortrait(bot *tgbotapi.BotAPI, ref turnRef, portraitURL string) (int, bool) {
-	id := strings.TrimPrefix(portraitURL, "/api/portrait/")
+	id := strings.TrimPrefix(portraitURL, "/api/v1/portrait/")
 	data, ok := m.hub.Portrait(id)
 	if !ok || len(data) == 0 {
 		// The cache is small (8 entries); a slow turn could see its

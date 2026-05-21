@@ -1,6 +1,6 @@
 <script lang="ts">
   // Settings.svelte mirrors the desktop Qt settings dialog. It's a
-  // tabbed modal that fetches /api/settings on open, lets the user
+  // tabbed modal that fetches /api/v1/settings on open, lets the user
   // edit every browser-relevant field, and POSTs the result back.
   //
   // Out of scope on purpose:

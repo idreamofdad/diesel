@@ -136,7 +136,7 @@ func TestTranscribe_RequestShape(t *testing.T) {
 				gotResponseFormat = r.FormValue("response_format")
 				f, _, err := r.FormFile("file")
 				require.NoError(t, err)
-				defer f.Close()
+				defer func() { _ = f.Close() }()
 				raw, _ := io.ReadAll(f)
 				gotFile = string(raw)
 

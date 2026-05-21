@@ -58,7 +58,7 @@ func (c *blobCache) get(id string) ([]byte, bool) {
 }
 
 // latest returns the most-recently inserted entry — used to serve
-// /api/portrait/latest without needing the caller to know the ID.
+// /api/v1/portrait/latest without needing the caller to know the ID.
 func (c *blobCache) latest() (string, []byte) {
 	if len(c.order) == 0 {
 		return "", nil
