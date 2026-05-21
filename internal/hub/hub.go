@@ -162,14 +162,6 @@ const mediaCacheSize = 8
 // recent frame after a backlog.
 const previewCacheSize = 64
 
-// telegramOriginPrefix marks turns that arrived over the Telegram bridge
-// (origins look like "telegram:<chat_id>"). Those render a landscape
-// portrait — Telegram displays photos wide — while every other origin
-// keeps the workflow's portrait dimensions. Duplicated here as a literal
-// rather than imported from internal/telegram, which imports this
-// package: importing it back would create a cycle.
-const telegramOriginPrefix = "telegram:"
-
 // Hub owns the conversation. Construct with New(), then call Start once
 // at boot to load any persisted history and Stop at shutdown.
 type Hub struct {
@@ -548,7 +540,6 @@ func (h *Hub) renderPortrait(ctx context.Context, s settings.AppSettings, reply 
 		}
 		h.broadcast(ev)
 	}
-	landscape := strings.HasPrefix(origin, telegramOriginPrefix)
 	png, err := comfyui.Generate(ctx, s, prompt, s.ImageNegativePrompt, reply.Naked, landscape, onProgress)
 	if err != nil || len(png) == 0 {
 		return
