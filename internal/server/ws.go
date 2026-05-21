@@ -21,6 +21,10 @@ import (
 type wsCommand struct {
 	Type string `json:"type"`
 	Text string `json:"text,omitempty"`
+	// Orientation picks the portrait orientation for a "send" command:
+	// "portrait" (default) or "landscape". An unrecognized value falls
+	// back to portrait — the read loop never rejects a frame.
+	Orientation string `json:"orientation,omitempty"`
 }
 
 // wsAckEvent is the synthetic event the server sends right after upgrade
@@ -142,7 +146,8 @@ func (m *Manager) readLoop(ctx context.Context, conn *websocket.Conn, clientID s
 			if text == "" {
 				continue
 			}
-			if err := m.hub.Send(ctx, text, clientID); err != nil {
+			landscape, _ := orientationLandscape(cmd.Orientation)
+			if err := m.hub.Send(ctx, text, clientID, landscape); err != nil {
 				if !errors.Is(err, hub.ErrBusy) {
 					// Non-busy errors aren't expected from Send other
 					// than empty-text guards; surface via the next

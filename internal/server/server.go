@@ -396,13 +396,29 @@ func (m *Manager) handleState(c *gin.Context) {
 	c.JSON(http.StatusOK, resp)
 }
 
+// orientationLandscape maps the API's "orientation" field to the hub's
+// landscape flag. Blank or "portrait" keeps the workflow's portrait
+// dimensions; "landscape" transposes them. valid is false for any other
+// value so callers can reject a typo.
+func orientationLandscape(s string) (landscape, valid bool) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", "portrait":
+		return false, true
+	case "landscape":
+		return true, true
+	default:
+		return false, false
+	}
+}
+
 // handleSend posts a user message into the hub. Returns 409 when
 // another turn is in flight; the client should wait for the next
 // turn_complete event before re-enabling its Send button.
 func (m *Manager) handleSend(c *gin.Context) {
 	var body struct {
-		Text   string `json:"text"`
-		Origin string `json:"origin"`
+		Text        string `json:"text"`
+		Origin      string `json:"origin"`
+		Orientation string `json:"orientation"`
 	}
 	if err := c.BindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -416,7 +432,12 @@ func (m *Manager) handleSend(c *gin.Context) {
 	if body.Origin == "" {
 		body.Origin = "anonymous"
 	}
-	if err := m.hub.Send(c.Request.Context(), body.Text, body.Origin); err != nil {
+	landscape, ok := orientationLandscape(body.Orientation)
+	if !ok {
+		c.JSON(http.StatusBadRequest, gin.H{"error": `orientation must be "portrait" or "landscape"`})
+		return
+	}
+	if err := m.hub.Send(c.Request.Context(), body.Text, body.Origin, landscape); err != nil {
 		if errors.Is(err, hub.ErrBusy) {
 			c.JSON(http.StatusConflict, gin.H{"error": "busy"})
 			return
@@ -432,11 +453,17 @@ func (m *Manager) handleSend(c *gin.Context) {
 // endpoint as-is (OpenAI-compatible servers accept the codecs browsers
 // produce), and on success pumps the recognized text into the hub as
 // if the originating client had sent it via /send. The 'origin' form
-// field carries the subscriber ID so TTS routing still works.
+// field carries the subscriber ID so TTS routing still works; the
+// optional 'orientation' field picks the portrait orientation.
 func (m *Manager) handleTranscribe(c *gin.Context) {
 	origin := c.PostForm("origin")
 	if origin == "" {
 		origin = "anonymous"
+	}
+	landscape, ok := orientationLandscape(c.PostForm("orientation"))
+	if !ok {
+		c.JSON(http.StatusBadRequest, gin.H{"error": `orientation must be "portrait" or "landscape"`})
+		return
 	}
 	header, err := c.FormFile("file")
 	if err != nil {
@@ -471,7 +498,7 @@ func (m *Manager) handleTranscribe(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"text": ""})
 		return
 	}
-	if err := m.hub.Send(c.Request.Context(), text, origin); err != nil {
+	if err := m.hub.Send(c.Request.Context(), text, origin, landscape); err != nil {
 		c.JSON(http.StatusOK, gin.H{"text": text, "send_error": err.Error()})
 		return
 	}

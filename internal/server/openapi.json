@@ -119,6 +119,12 @@
                   "origin": {
                     "type": "string",
                     "description": "Client ID so reply audio routes back. Defaults to \"anonymous\"."
+                  },
+                  "orientation": {
+                    "type": "string",
+                    "enum": ["portrait", "landscape"],
+                    "default": "portrait",
+                    "description": "Orientation of the portrait rendered for this turn. Any other value is rejected with 400."
                   }
                 }
               }
@@ -365,7 +371,7 @@
       "get": {
         "tags": ["websocket"],
         "summary": "WebSocket event stream",
-        "description": "Upgrades to a WebSocket. `ws://<host>:<port>/api/v1/ws?client_id=<id>&token=<token>`. The client picks a stable `client_id` and reuses it across reconnects so reply-audio routing stays consistent. The server pings every 25s; reconnect with backoff on drop and re-fetch `GET /state` on resume.\n\nClient → server commands are JSON objects: `{\"type\":\"send\",\"text\":\"...\"}`, `{\"type\":\"ping\"}`. Unknown commands are ignored. `send` over the socket uses the connection's `client_id` as the origin automatically.\n\nServer → client frames are `Event` objects (see the `Event` schema). The first frame after upgrade is an `ack`.",
+        "description": "Upgrades to a WebSocket. `ws://<host>:<port>/api/v1/ws?client_id=<id>&token=<token>`. The client picks a stable `client_id` and reuses it across reconnects so reply-audio routing stays consistent. The server pings every 25s; reconnect with backoff on drop and re-fetch `GET /state` on resume.\n\nClient → server commands are JSON objects: `{\"type\":\"send\",\"text\":\"...\",\"orientation\":\"portrait|landscape\"}`, `{\"type\":\"ping\"}`. `orientation` is optional and defaults to portrait; an unrecognized value falls back to portrait rather than rejecting the frame. Unknown commands are ignored. `send` over the socket uses the connection's `client_id` as the origin automatically.\n\nServer → client frames are `Event` objects (see the `Event` schema). The first frame after upgrade is an `ack`.",
         "operationId": "websocket",
         "parameters": [
           {
@@ -504,6 +510,12 @@
           "origin": {
             "type": "string",
             "description": "Client's stable ID so reply audio routes back to it. Defaults to \"anonymous\"."
+          },
+          "orientation": {
+            "type": "string",
+            "enum": ["portrait", "landscape"],
+            "default": "portrait",
+            "description": "Orientation of the portrait rendered for this turn. \"landscape\" transposes the workflow's width/height for a wide image. Omit or send \"portrait\" for the default. Any other value is rejected with 400."
           }
         },
         "required": ["text"]

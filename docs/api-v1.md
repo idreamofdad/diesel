@@ -49,18 +49,22 @@ one of `user`, `assistant`, `system`; assistant messages may carry an
 Post a user message. Body:
 
 ```json
-{ "text": "hello", "origin": "<client_id>" }
+{ "text": "hello", "origin": "<client_id>", "orientation": "portrait" }
 ```
 
 `origin` should be the client's stable ID so reply audio routes back to it.
-Responses: `202` `{"ok":true}` on accept, `400` on empty text, `409`
-`{"error":"busy"}` when another turn is in flight.
+`orientation` is optional — `"portrait"` (default) or `"landscape"`; it picks
+the orientation of the portrait rendered for the turn (`"landscape"`
+transposes the workflow's width/height for a wide image). Responses: `202`
+`{"ok":true}` on accept, `400` on empty text or an invalid `orientation`,
+`409` `{"error":"busy"}` when another turn is in flight.
 
 ### `POST /transcribe`
 
-Multipart upload for voice input. Form fields: `file` (audio blob) and
-`origin` (client ID). The server runs STT, then feeds the recognized text
-into the conversation as a turn. Returns `{"text":"...","sent":true}`.
+Multipart upload for voice input. Form fields: `file` (audio blob), `origin`
+(client ID), and optional `orientation` (`portrait`/`landscape`, same meaning
+as `/send`). The server runs STT, then feeds the recognized text into the
+conversation as a turn. Returns `{"text":"...","sent":true}`.
 
 ### `GET /portrait/:id`, `GET /portrait-preview/:id`, `GET /audio/:id`
 
@@ -86,9 +90,12 @@ The server pings every 25s; reconnect with backoff on drop and re-fetch
 ### Client → server commands
 
 ```json
-{ "type": "send", "text": "hello" }
+{ "type": "send", "text": "hello", "orientation": "portrait" }
 { "type": "ping" }
 ```
+
+`orientation` on a `send` command is optional (`portrait`/`landscape`,
+default `portrait`); an unrecognized value falls back to portrait.
 
 `send` over the socket uses the connection's `client_id` as the origin
 automatically. Unknown commands are ignored.
