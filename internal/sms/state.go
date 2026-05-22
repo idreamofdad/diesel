@@ -1,21 +1,19 @@
 package sms
 
 import (
+	"context"
 	"encoding/json"
-	"os"
 	"time"
 
-	"diesel/internal/util"
+	"diesel/internal/storage"
 )
 
-// stateFileName lives next to settings.json in the user config dir.
-// Kept separate from settings because it's bookkeeping, not configuration —
-// the user never edits it and it changes far more often than settings do,
-// so persisting them together would force every save to rewrite the
-// full settings blob.
-const stateFileName = "sms_state.json"
+// stateKey is the kv row holding the SMS poll bookkeeping. Stored apart
+// from the settings blob because it's bookkeeping, not configuration —
+// the user never edits it and it changes far more often.
+const stateKey = "sms_state"
 
-// pollState is the on-disk record that lets the poller pick up where it
+// pollState is the persisted record that lets the poller pick up where it
 // left off across restarts. Without this, every restart processed the
 // most-recent inbound message again because the in-memory dedup set
 // reset and Twilio's DateSent filter only has day-level granularity.
@@ -29,39 +27,26 @@ type pollState struct {
 	SeenSIDs []string  `json:"seen_sids"`
 }
 
-func statePath() (string, error) {
-	return util.ConfigFilePath(stateFileName)
-}
-
 // loadPollState reads the persisted bookkeeping. A missing or
-// unparseable file returns an empty struct — same fall-through pattern
-// as conversation.Load — so a fresh install just starts from "now"
-// without a special-case branch in the caller.
-func loadPollState() pollState {
+// unparseable record returns an empty struct — a fresh install just
+// starts from "now" without a special-case branch in the caller.
+func loadPollState(ctx context.Context, store *storage.Store) pollState {
 	var s pollState
-	path, err := statePath()
-	if err != nil {
+	raw, ok, err := store.KVGet(ctx, stateKey)
+	if err != nil || !ok {
 		return s
 	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return s
-	}
-	_ = json.Unmarshal(data, &s)
+	_ = json.Unmarshal(raw, &s)
 	return s
 }
 
-// savePollState writes the bookkeeping atomically. Errors are not
-// surfaced — a failed save means the next restart might re-process a
-// message, which is annoying but not destructive. The caller logs.
-func savePollState(s pollState) error {
-	path, err := statePath()
-	if err != nil {
-		return err
-	}
+// savePollState writes the bookkeeping. Errors are surfaced for the
+// caller to log — a failed save means the next restart might re-process
+// a message, which is annoying but not destructive.
+func savePollState(ctx context.Context, store *storage.Store, s pollState) error {
 	data, err := json.Marshal(s)
 	if err != nil {
 		return err
 	}
-	return util.AtomicWriteFile(path, data, 0o600)
+	return store.KVSet(ctx, stateKey, data)
 }

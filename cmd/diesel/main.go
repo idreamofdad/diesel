@@ -16,6 +16,7 @@ import (
 	"diesel/internal/server"
 	"diesel/internal/settings"
 	"diesel/internal/sms"
+	"diesel/internal/storage"
 	"diesel/internal/telegram"
 	"diesel/internal/tracing"
 	"diesel/internal/tts"
@@ -54,9 +55,36 @@ func main() {
 		}()
 	}
 
-	// Hub owns the conversation. Started before any UI so the on-disk
+	// SQLite-backed persistence: conversation history, the settings blob,
+	// and each bridge's bookkeeping all live in one database file. Opened
+	// before anything reads settings or history.
+	dbPath, err := util.ConfigFilePath("diesel.db")
+	if err != nil {
+		log.Fatalf("[storage] config path: %v", err)
+	}
+	store, err := storage.Open(dbPath)
+	if err != nil {
+		log.Fatalf("[storage] open: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+	// Wire the settings package to the database. settings can't import
+	// storage (storage imports settings), so persistence is injected.
+	settings.SetBackend(
+		func() settings.AppSettings {
+			s, err := store.LoadSettings(context.Background())
+			if err != nil {
+				log.Printf("[settings] load: %v", err)
+			}
+			return s
+		},
+		func(s settings.AppSettings) error {
+			return store.SaveSettings(context.Background(), s)
+		},
+	)
+
+	// Hub owns the conversation. Started before any UI so the persisted
 	// history is loaded by the time Qt is ready to paint it.
-	h := hub.New()
+	h := hub.New(store)
 	h.Start(context.Background())
 
 	// HTTP server. Wired up before the window opens so it's reachable
@@ -67,13 +95,13 @@ func main() {
 
 	// SMS bridge over Twilio. Same Apply/Stop shape as the HTTP server
 	// — opt-in via settings, hot-reapplied on every Save.
-	smsMgr := sms.New(h)
+	smsMgr := sms.New(h, store)
 	smsMgr.Apply(settings.Load())
 	defer smsMgr.Stop()
 
 	// Telegram bot bridge. Same Apply/Stop shape — opt-in, hot-reapplied
 	// on every Save.
-	tgMgr := telegram.New(h)
+	tgMgr := telegram.New(h, store)
 	tgMgr.Apply(settings.Load())
 	defer tgMgr.Stop()
 

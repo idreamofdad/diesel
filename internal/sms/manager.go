@@ -11,6 +11,7 @@ import (
 
 	"diesel/internal/hub"
 	"diesel/internal/settings"
+	"diesel/internal/storage"
 	"diesel/internal/tracing"
 )
 
@@ -43,7 +44,8 @@ const minPollSeconds = 3
 // so the manager carries no per-turn state — concurrent SMS turns from
 // different senders are handled without a race.
 type Manager struct {
-	hub *hub.Hub
+	hub   *hub.Hub
+	store *storage.Store
 
 	mu      sync.Mutex
 	applied config
@@ -153,9 +155,10 @@ func normalizeNumber(s string) string {
 
 // New returns a stopped Manager bound to the given hub. Apply must be
 // called to start it.
-func New(h *hub.Hub) *Manager {
+func New(h *hub.Hub, store *storage.Store) *Manager {
 	return &Manager{
 		hub:    h,
+		store:  store,
 		status: "○ Stopped",
 	}
 }
@@ -236,7 +239,7 @@ func (m *Manager) Stop() {
 // isn't reprocessed if the app bounces between the time Twilio sent
 // it and the time we acked it via the assistant reply.
 func (m *Manager) pollLoop(ctx context.Context, client *Client, cfg config) {
-	state := loadPollState()
+	state := loadPollState(ctx, m.store)
 	// Fresh install or a wiped state file: seed the cursor at "now" so
 	// we don't replay the entire Twilio inbox the first time the app
 	// runs. A normal restart finds a populated cursor here and resumes
@@ -308,7 +311,7 @@ func (m *Manager) pollOnce(ctx context.Context, client *Client, cfg config, sinc
 		// A crash between hub.Send and the next poll would otherwise
 		// replay this message on restart — worse than the rare case
 		// where we miss a reply (the user notices and retries).
-		if err := savePollState(pollState{Cursor: *since, SeenSIDs: seen.snapshot()}); err != nil {
+		if err := savePollState(ctx, m.store, pollState{Cursor: *since, SeenSIDs: seen.snapshot()}); err != nil {
 			log.Printf("[sms] save state: %v", err)
 		}
 		if !cfg.isAllowed(msg.From) {

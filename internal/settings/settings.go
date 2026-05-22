@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
@@ -201,44 +200,38 @@ func Default() AppSettings {
 	}
 }
 
-// Path returns the canonical settings location:
-//
-//	macOS:   ~/Library/Application Support/diesel/settings.json
-//	Linux:   $XDG_CONFIG_HOME/diesel/settings.json (or ~/.config/diesel/...)
-//	Windows: %AppData%/diesel/settings.json
-func Path() (string, error) {
-	return util.ConfigFilePath("settings.json")
+// Persistence is injected at startup via SetBackend so this package never
+// imports the storage layer: storage imports this package for the
+// AppSettings type, and a direct dependency back would be an import cycle.
+var (
+	loadFn func() AppSettings
+	saveFn func(AppSettings) error
+)
+
+// SetBackend wires the load/save functions. Called once at startup before
+// any Load or Save. Until then Load returns defaults and Save is a no-op,
+// which is what unit tests that don't exercise persistence want.
+func SetBackend(load func() AppSettings, save func(AppSettings) error) {
+	loadFn = load
+	saveFn = save
 }
 
-// Load reads the on-disk settings and falls back to defaults for anything
-// missing or unreadable. Never returns an error — callers always get a
+// Load returns the persisted settings, falling back to defaults when no
+// backend has been wired. Never returns an error — callers always get a
 // usable struct.
 func Load() AppSettings {
-	s := Default()
-	path, err := Path()
-	if err != nil {
-		return s
+	if loadFn != nil {
+		return loadFn()
 	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return s
-	}
-	_ = json.Unmarshal(data, &s)
-	return s
+	return Default()
 }
 
-// Save writes the settings to disk atomically. The file mode is 0600
-// because the API key lives in plaintext.
+// Save persists the settings through the wired backend.
 func (s AppSettings) Save() error {
-	path, err := Path()
-	if err != nil {
-		return err
+	if saveFn != nil {
+		return saveFn(s)
 	}
-	data, err := json.MarshalIndent(s, "", "  ")
-	if err != nil {
-		return err
-	}
-	return util.AtomicWriteFile(path, data, 0o600)
+	return nil
 }
 
 // modelEntry is one row from an OpenAI-compatible /models response.

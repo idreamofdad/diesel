@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -13,6 +14,7 @@ import (
 
 	"diesel/internal/hub"
 	"diesel/internal/settings"
+	"diesel/internal/storage"
 
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
@@ -21,10 +23,20 @@ import (
 
 func init() { gin.SetMode(gin.TestMode) }
 
+// newTestHub returns a hub backed by a throwaway SQLite database in a
+// temp dir, closed automatically when the test ends.
+func newTestHub(t *testing.T) *hub.Hub {
+	t.Helper()
+	st, err := storage.Open(filepath.Join(t.TempDir(), "diesel.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = st.Close() })
+	return hub.New(st)
+}
+
 // TestAuthMiddleware_NoTokenAllows verifies the blank-token "no auth"
 // path. With ServerAuthToken="" every request should pass.
 func TestAuthMiddleware_NoTokenAllows(t *testing.T) {
-	h := hub.New()
+	h := newTestHub(t)
 	m := New(h, nil)
 	r := m.buildRouter("")
 
@@ -38,7 +50,7 @@ func TestAuthMiddleware_NoTokenAllows(t *testing.T) {
 // Authorization header and the ?token= query form must work, and
 // missing/wrong tokens get 401.
 func TestAuthMiddleware_TokenEnforced(t *testing.T) {
-	h := hub.New()
+	h := newTestHub(t)
 	m := New(h, nil)
 	r := m.buildRouter("secret")
 
@@ -67,7 +79,7 @@ func TestAuthMiddleware_TokenEnforced(t *testing.T) {
 // We don't actually run the LLM; instead we put the hub into the in-flight
 // state by holding the lock through a manual mutation.
 func TestHandleSend_Busy(t *testing.T) {
-	h := hub.New()
+	h := newTestHub(t)
 	m := New(h, nil)
 	r := m.buildRouter("")
 
@@ -133,7 +145,7 @@ func TestNoRoute_AssetMisses404(t *testing.T) {
 	stub := fstest.MapFS{
 		"index.html": {Data: []byte("<!doctype html><html></html>")},
 	}
-	h := hub.New()
+	h := newTestHub(t)
 	m := New(h, stub)
 	r := m.buildRouter("")
 
@@ -155,7 +167,7 @@ func TestNoRoute_AssetMisses404(t *testing.T) {
 // TestHandleState_ReturnsHistory verifies the snapshot endpoint
 // reflects whatever the hub currently holds.
 func TestHandleState_ReturnsHistory(t *testing.T) {
-	h := hub.New()
+	h := newTestHub(t)
 	m := New(h, nil)
 	r := m.buildRouter("")
 
@@ -179,7 +191,7 @@ func TestManager_Apply_StartStop(t *testing.T) {
 	port := ln.Addr().(*net.TCPAddr).Port
 	require.NoError(t, ln.Close())
 
-	h := hub.New()
+	h := newTestHub(t)
 	m := New(h, nil)
 
 	s := settings.AppSettings{EnableServer: true, ServerPort: port}
@@ -220,7 +232,7 @@ func TestManager_Apply_BindFailureKeepsPriorRunning(t *testing.T) {
 	defer func() { _ = blocker.Close() }()
 	badPort := blocker.Addr().(*net.TCPAddr).Port
 
-	h := hub.New()
+	h := newTestHub(t)
 	m := New(h, nil)
 	defer m.Stop()
 

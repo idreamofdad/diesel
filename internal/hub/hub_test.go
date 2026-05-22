@@ -2,13 +2,26 @@ package hub
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"diesel/internal/storage"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// newTestStore opens a throwaway SQLite database in a temp dir, closed
+// automatically when the test ends.
+func newTestStore(t *testing.T) *storage.Store {
+	t.Helper()
+	st, err := storage.Open(filepath.Join(t.TempDir(), "diesel.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = st.Close() })
+	return st
+}
 
 // TestBlobCache_FIFOEviction exercises the eviction order — the hub
 // keeps only the last N media blobs and the rest are dropped. Order
@@ -52,7 +65,7 @@ func TestBlobCache_PutSameIDReplaces(t *testing.T) {
 // TestSubscribeUnsubscribe — basic registration and the
 // close-on-unsubscribe contract.
 func TestSubscribeUnsubscribe(t *testing.T) {
-	h := New()
+	h := New(newTestStore(t))
 	sub := h.Subscribe("test")
 	assert.Equal(t, "test", sub.ID)
 
@@ -65,7 +78,7 @@ func TestSubscribeUnsubscribe(t *testing.T) {
 // its ID; the prior subscriber's channel must close so its goroutine
 // exits.
 func TestSubscribe_ReplaceClosesPrior(t *testing.T) {
-	h := New()
+	h := New(newTestStore(t))
 	first := h.Subscribe("same-id")
 	second := h.Subscribe("same-id")
 
@@ -88,11 +101,7 @@ func TestSubscribe_ReplaceClosesPrior(t *testing.T) {
 // goroutine got far enough to attempt and report, not that the LLM
 // itself succeeded.
 func TestSend_DetachesCallerContext(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("APPDATA", t.TempDir())
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-
-	h := New()
+	h := New(newTestStore(t))
 	sub := h.Subscribe("test")
 
 	ctx, cancel := context.WithCancel(context.Background())

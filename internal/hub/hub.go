@@ -26,6 +26,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -33,8 +34,8 @@ import (
 
 	"diesel/internal/chat"
 	"diesel/internal/comfyui"
-	"diesel/internal/conversation"
 	"diesel/internal/settings"
+	"diesel/internal/storage"
 	"diesel/internal/tracing"
 	"diesel/internal/tts"
 	"diesel/internal/util"
@@ -166,6 +167,7 @@ const previewCacheSize = 64
 // at boot to load any persisted history and Stop at shutdown.
 type Hub struct {
 	mu         sync.Mutex
+	store      *storage.Store
 	history    []chat.Message
 	inFlight   bool
 	subs       map[string]*Subscriber
@@ -179,9 +181,11 @@ type Hub struct {
 	lastStatus string
 }
 
-// New returns an empty hub. Call Start to populate from disk.
-func New() *Hub {
+// New returns an empty hub backed by store. Call Start to populate from
+// persisted history.
+func New(store *storage.Store) *Hub {
 	return &Hub{
+		store:      store,
 		subs:       make(map[string]*Subscriber),
 		portraits:  newBlobCache(mediaCacheSize),
 		previews:   newBlobCache(previewCacheSize),
@@ -196,8 +200,12 @@ func New() *Hub {
 func (h *Hub) Start(ctx context.Context) {
 	s := settings.Load()
 	if s.SaveToDisk {
+		hist, err := h.store.LoadConversation(ctx)
+		if err != nil {
+			log.Printf("[hub] load conversation: %v", err)
+		}
 		h.mu.Lock()
-		h.history = conversation.Load()
+		h.history = hist
 		h.mu.Unlock()
 	}
 	if path, err := comfyui.CharacterImagePath(); err == nil {
@@ -327,7 +335,9 @@ func (h *Hub) Clear(ctx context.Context) error {
 	h.history = nil
 	h.mu.Unlock()
 	if settings.Load().SaveToDisk {
-		_ = conversation.Save(ctx, nil)
+		if err := h.store.ClearConversation(ctx); err != nil {
+			log.Printf("[hub] clear conversation: %v", err)
+		}
 	}
 	h.broadcast(Event{Type: EventCleared, Timestamp: time.Now()})
 	h.setStatus("Ready")
@@ -363,10 +373,9 @@ func (h *Hub) Send(ctx context.Context, text, origin string, landscape bool) err
 	h.mu.Unlock()
 
 	s := settings.Load()
-	if s.SaveToDisk {
-		// Best-effort — failure shouldn't block the turn.
-		_ = conversation.Save(ctx, snapshot)
-	}
+	// The user message isn't persisted yet — it's written together with
+	// the assistant reply once the turn succeeds, so a failed turn leaves
+	// no dangling half-exchange on disk.
 	h.broadcast(Event{
 		Type:      EventTurnStarted,
 		Origin:    origin,
@@ -384,7 +393,7 @@ func (h *Hub) Send(ctx context.Context, text, origin string, landscape bool) err
 	// turn pipeline genuinely outlives the originating request, so
 	// we keep the context's values (tracing span lineage) but drop
 	// the deadline/cancel.
-	go h.runTurn(context.WithoutCancel(ctx), s, snapshot, origin, turnID, landscape)
+	go h.runTurn(context.WithoutCancel(ctx), s, user, snapshot, origin, turnID, landscape)
 	return nil
 }
 
@@ -395,7 +404,7 @@ func (h *Hub) Send(ctx context.Context, text, origin string, landscape bool) err
 // don't have to coalesce intermediate states). Failure of TTS or portrait
 // does not fail the turn; only the chat-completion error path emits
 // EventTurnError.
-func (h *Hub) runTurn(ctx context.Context, s settings.AppSettings, snapshot []chat.Message, origin string, turnID int64, landscape bool) {
+func (h *Hub) runTurn(ctx context.Context, s settings.AppSettings, user chat.Message, snapshot []chat.Message, origin string, turnID int64, landscape bool) {
 	turnCtx, turnSpan := tracing.StartSpan(ctx, "hub.turn",
 		attribute.String("turn.origin", origin),
 		attribute.Int64("turn.id", turnID),
@@ -408,16 +417,13 @@ func (h *Hub) runTurn(ctx context.Context, s settings.AppSettings, snapshot []ch
 		turnSpan.SetStatus(codes.Error, err.Error())
 		h.mu.Lock()
 		// Roll back the user turn so the next send isn't replayed with
-		// a half-finished exchange in history.
+		// a half-finished exchange in history. Nothing was persisted yet,
+		// so this is an in-memory rollback only.
 		if n := len(h.history); n > 0 && h.history[n-1].Role == chat.RoleUser {
 			h.history = h.history[:n-1]
 		}
 		h.inFlight = false
-		snapshot := append([]chat.Message(nil), h.history...)
 		h.mu.Unlock()
-		if s.SaveToDisk {
-			_ = conversation.Save(turnCtx, snapshot)
-		}
 		h.broadcast(Event{
 			Type:      EventTurnError,
 			Origin:    origin,
@@ -432,14 +438,17 @@ func (h *Hub) runTurn(ctx context.Context, s settings.AppSettings, snapshot []ch
 	assistant := chat.Message{Role: chat.RoleAssistant, Content: reply.Text, Emotion: reply.Emotion, Naked: reply.Naked, Timestamp: time.Now()}
 	h.mu.Lock()
 	h.history = append(h.history, assistant)
-	hist := append([]chat.Message(nil), h.history...)
 	// Clear inFlight as soon as text lands so the user can immediately
 	// send the next message — TTS and portrait rendering keep running
 	// in the background and arrive on their own events.
 	h.inFlight = false
 	h.mu.Unlock()
 	if s.SaveToDisk {
-		_ = conversation.Save(turnCtx, hist)
+		// Persist the completed exchange as one append — user first so it
+		// keeps the lower id, then the assistant reply.
+		if err := h.store.AppendMessages(turnCtx, user, assistant); err != nil {
+			log.Printf("[hub] persist conversation: %v", err)
+		}
 	}
 
 	// Text event fires immediately — no waiting on media.
