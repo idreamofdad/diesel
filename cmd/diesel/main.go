@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"log"
 	"os"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -38,7 +40,26 @@ const (
 // routing and the busy-broadcast filter both know who "the desktop" is.
 const desktopOrigin = "desktop"
 
+// init pins the main goroutine to the process's main OS thread. macOS
+// Cocoa requires every UI call — including the QApplication constructor
+// and its menu setup — to run on that thread; without this the Go
+// scheduler can migrate main() onto another thread (more likely now that
+// startup opens the database first) and Qt aborts with an "API misuse:
+// setting the main menu on a non-main thread" exception.
+func init() {
+	runtime.LockOSThread()
+}
+
 func main() {
+	// -data-dir overrides where the database and character image live;
+	// blank keeps the platform user-config default. Parsed first so it's
+	// in effect before anything resolves a config path.
+	dataDir := flag.String("data-dir", "", "directory for Diesel's data (database, character image); defaults to the OS user config dir")
+	flag.Parse()
+	if *dataDir != "" {
+		util.SetConfigDir(*dataDir)
+	}
+
 	// OpenTelemetry: a no-op unless OTEL_EXPORTER_OTLP_ENDPOINT (or the
 	// trace-specific override) is set in the environment. Shutdown flushes
 	// any in-flight spans on exit; bound to a 5 s deadline so a stuck
