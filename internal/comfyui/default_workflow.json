@@ -106,19 +106,6 @@
       "title": "VAE Decode"
     }
   },
-  "19": {
-    "inputs": {
-      "filename_prefix": "ComfyUI",
-      "images": [
-        "17",
-        0
-      ]
-    },
-    "class_type": "SaveImage",
-    "_meta": {
-      "title": "Save Image"
-    }
-  },
   "53": {
     "inputs": {
       "lora_name": "il\\characters\\CEDDV8PWP5T8XNTS170HMHJRQ0.safetensors",
@@ -201,6 +188,18 @@
     "class_type": "PrimitiveInt",
     "_meta": {
       "title": "Height"
+    }
+  },
+  "60": {
+    "inputs": {
+      "images": [
+        "17",
+        0
+      ]
+    },
+    "class_type": "PreviewImage",
+    "_meta": {
+      "title": "Preview Image"
     }
   }
 }
