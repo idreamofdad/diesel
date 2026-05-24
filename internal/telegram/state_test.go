@@ -1,101 +1,90 @@
 package telegram
 
 import (
-	"os"
+	"context"
 	"path/filepath"
 	"testing"
 
-	"diesel/internal/util"
+	"diesel/internal/storage"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// withTempConfigDir points util.ConfigFilePath at a temp dir for the
-// duration of the test. ConfigFilePath reads from XDG_CONFIG_HOME on
-// Linux and from os.UserConfigDir's resolution elsewhere; setting HOME
-// (and the XDG override on Linux) covers both.
-func withTempConfigDir(t *testing.T) {
+// newTestStore opens a throwaway SQLite database in a temp dir, closed
+// automatically when the test ends.
+func newTestStore(t *testing.T) *storage.Store {
 	t.Helper()
-	dir := t.TempDir()
-	t.Setenv("HOME", dir)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, ".config"))
+	st, err := storage.Open(filepath.Join(t.TempDir(), "diesel.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = st.Close() })
+	return st
 }
 
 // TestState_Roundtrip — save → load restores the offset and reports the
-// file as found. This is the contract a restart relies on to resume the
-// poll where it left off instead of re-skipping the backlog.
+// record as found. This is the contract a restart relies on to resume
+// the poll where it left off instead of re-skipping the backlog.
 func TestState_Roundtrip(t *testing.T) {
-	withTempConfigDir(t)
+	store := newTestStore(t)
+	ctx := context.Background()
 
-	require.NoError(t, saveState(state{Offset: 4242}))
+	require.NoError(t, saveState(ctx, store, state{Offset: 4242}))
 
-	out, found := loadState()
+	out, found := loadState(ctx, store)
 	assert.True(t, found)
 	assert.Equal(t, 4242, out.Offset)
 }
 
-// TestState_MissingFile — a fresh install has no state file. found is
+// TestState_Missing — a fresh install has no stored record. found is
 // false, which the poll loop treats as "skip the backlog" rather than
 // replaying up to 24 h of queued messages.
-func TestState_MissingFile(t *testing.T) {
-	withTempConfigDir(t)
-
-	out, found := loadState()
+func TestState_Missing(t *testing.T) {
+	out, found := loadState(context.Background(), newTestStore(t))
 	assert.False(t, found)
 	assert.Zero(t, out.Offset)
 }
 
-// TestState_CorruptFile — a half-written or hand-edited file must not
-// crash the loader. It falls into the same branch as a missing file:
-// found is false, so the loop skips the backlog (safer than replaying).
-func TestState_CorruptFile(t *testing.T) {
-	withTempConfigDir(t)
+// TestState_CorruptValue — a malformed stored value must not crash the
+// loader. It falls into the same branch as a missing record: found is
+// false, so the loop skips the backlog (safer than replaying).
+func TestState_CorruptValue(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	require.NoError(t, store.KVSet(ctx, offsetKey, []byte("{not json")))
 
-	path, err := statePath()
-	require.NoError(t, err)
-	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
-	require.NoError(t, os.WriteFile(path, []byte("{not json"), 0o600))
-
-	out, found := loadState()
+	out, found := loadState(ctx, store)
 	assert.False(t, found)
 	assert.Zero(t, out.Offset)
 }
 
 // TestPortraitState_Roundtrip — save → load restores the chat → portrait
-// message map, including the negative chat IDs Telegram uses. This is
-// the contract that lets a restart still delete a portrait posted before
-// it.
+// message map, including the negative chat IDs Telegram uses.
 func TestPortraitState_Roundtrip(t *testing.T) {
-	withTempConfigDir(t)
+	store := newTestStore(t)
+	ctx := context.Background()
 
 	in := map[int64]int{12345: 67, -100200300: 89}
-	require.NoError(t, savePortraitState(in))
+	require.NoError(t, savePortraitState(ctx, store, in))
 
-	assert.Equal(t, in, loadPortraitState())
+	assert.Equal(t, in, loadPortraitState(ctx, store))
 }
 
-// TestPortraitState_MissingFile — a fresh install has no file; load
-// yields an empty, non-nil map the dispatch loop can index freely.
-func TestPortraitState_MissingFile(t *testing.T) {
-	withTempConfigDir(t)
-
-	out := loadPortraitState()
+// TestPortraitState_Missing — a fresh install has no record; load yields
+// an empty, non-nil map the dispatch loop can index freely.
+func TestPortraitState_Missing(t *testing.T) {
+	out := loadPortraitState(context.Background(), newTestStore(t))
 	assert.NotNil(t, out)
 	assert.Empty(t, out)
 }
 
-// TestPortraitState_CorruptFile — a hand-edited or half-written file
-// must not crash the loader; it falls back to an empty map.
-func TestPortraitState_CorruptFile(t *testing.T) {
-	withTempConfigDir(t)
+// TestPortraitState_CorruptValue — a malformed stored value must not
+// crash the loader; it falls back to an empty map.
+func TestPortraitState_CorruptValue(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	require.NoError(t, store.KVSet(ctx, portraitsKey, []byte("{not json")))
 
-	path, err := util.ConfigFilePath(portraitStateFileName)
-	require.NoError(t, err)
-	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
-	require.NoError(t, os.WriteFile(path, []byte("{not json"), 0o600))
-
-	out := loadPortraitState()
+	out := loadPortraitState(ctx, store)
 	assert.NotNil(t, out)
 	assert.Empty(t, out)
 }

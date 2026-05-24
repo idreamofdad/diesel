@@ -29,9 +29,28 @@ func FirstNonEmpty(specific, fallback string) string {
 	return fallback
 }
 
-// ConfigFilePath returns ~/.../diesel/<name> in the platform's user config
-// directory. Used for settings.json, conversation.json, character.png, …
+// configDirOverride, when non-empty, replaces the default
+// ~/.../diesel data directory. Set once at startup via SetConfigDir,
+// before any ConfigFilePath call.
+var configDirOverride string
+
+// SetConfigDir overrides the directory ConfigFilePath places files in.
+// An empty string restores the platform default. Intended to be called
+// once at startup (e.g. from a -data-dir flag) before anything opens the
+// database or reads a config file.
+func SetConfigDir(dir string) {
+	configDirOverride = dir
+}
+
+// ConfigFilePath returns the absolute path of <name> in Diesel's data
+// directory — the SetConfigDir override when set, otherwise the
+// platform's user config dir plus "diesel". Used for diesel.db,
+// character.png, … The directory itself is created on demand by the
+// callers that write into it (AtomicWriteFile, storage.Open).
 func ConfigFilePath(name string) (string, error) {
+	if configDirOverride != "" {
+		return filepath.Join(configDirOverride, name), nil
+	}
 	base, err := os.UserConfigDir()
 	if err != nil {
 		return "", err

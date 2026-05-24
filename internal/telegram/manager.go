@@ -29,6 +29,7 @@ import (
 	"diesel/internal/audio"
 	"diesel/internal/hub"
 	"diesel/internal/settings"
+	"diesel/internal/storage"
 	"diesel/internal/tracing"
 	"diesel/internal/util"
 
@@ -72,7 +73,8 @@ const greeting = "Hey — it's Diesel. Just say something and I'll answer. Voice
 // main.go bootstraps it the same way: New(hub), then Apply(settings) at
 // startup and on every settings save.
 type Manager struct {
-	hub *hub.Hub
+	hub   *hub.Hub
+	store *storage.Store
 
 	mu      sync.Mutex
 	applied config
@@ -147,9 +149,10 @@ func normalizeUsername(s string) string {
 
 // New returns a stopped Manager bound to the given hub. Apply must be
 // called to start it.
-func New(h *hub.Hub) *Manager {
+func New(h *hub.Hub, store *storage.Store) *Manager {
 	return &Manager{
 		hub:    h,
+		store:  store,
 		status: "○ Stopped",
 	}
 }
@@ -260,14 +263,14 @@ func (m *Manager) run(ctx context.Context, sub *hub.Subscriber, cfg config) {
 // we learn the latest update_id and start one past it, so enabling the
 // bot doesn't replay up to 24 h of queued messages.
 func (m *Manager) pollLoop(ctx context.Context, bot *tgbotapi.BotAPI, cfg config, incoming chan<- pending) {
-	st, found := loadState()
+	st, found := loadState(ctx, m.store)
 	if !found {
 		// offset -1 with limit 1 returns just the most recent update —
 		// enough to learn where the backlog ends.
 		if ups, err := bot.GetUpdates(tgbotapi.UpdateConfig{Offset: -1, Limit: 1}); err == nil && len(ups) > 0 {
 			st.Offset = ups[len(ups)-1].UpdateID + 1
 		}
-		if err := saveState(st); err != nil {
+		if err := saveState(ctx, m.store, st); err != nil {
 			log.Printf("[telegram] save state: %v", err)
 		}
 		log.Printf("[telegram] first run — skipping backlog, starting at offset=%d", st.Offset)
@@ -300,7 +303,7 @@ func (m *Manager) pollLoop(ctx context.Context, bot *tgbotapi.BotAPI, cfg config
 // rather than replaying it on restart — the same tradeoff sms/state.go
 // makes, and consistent with the in-memory (non-persisted) queue.
 func (m *Manager) handleUpdate(ctx context.Context, bot *tgbotapi.BotAPI, cfg config, up tgbotapi.Update, incoming chan<- pending) {
-	if err := saveState(state{Offset: up.UpdateID + 1}); err != nil {
+	if err := saveState(ctx, m.store, state{Offset: up.UpdateID + 1}); err != nil {
 		log.Printf("[telegram] save state: %v", err)
 	}
 
@@ -374,7 +377,7 @@ func (m *Manager) dispatchLoop(ctx context.Context, sub *hub.Subscriber, bot *tg
 	// replaces (or clears) it. This one is persisted: without it a
 	// restart would forget the posted portraits and never clean them up.
 	awaitingPortrait := map[int64]turnRef{}
-	lastPortrait := loadPortraitState()
+	lastPortrait := loadPortraitState(ctx, m.store)
 	stopTyping := func() {
 		if typingCancel != nil {
 			typingCancel()
@@ -473,13 +476,13 @@ func (m *Manager) dispatchLoop(ctx context.Context, sub *hub.Subscriber, bot *tg
 					// empty.
 					m.deletePortrait(bot, lastPortrait, ref.chatID)
 					lastPortrait[ref.chatID] = newID
-					persistPortraits(lastPortrait)
+					m.persistPortraits(ctx, lastPortrait)
 					break
 				}
 				// Image gen off or the render failed — no replacement is
 				// coming, so drop the now-stale portrait outright.
 				m.deletePortrait(bot, lastPortrait, ref.chatID)
-				persistPortraits(lastPortrait)
+				m.persistPortraits(ctx, lastPortrait)
 			case hub.EventTurnError:
 				if mine {
 					stopTyping()
@@ -654,11 +657,11 @@ func (m *Manager) deletePortrait(bot *tgbotapi.BotAPI, lastPortrait map[int64]in
 	}
 }
 
-// persistPortraits writes the chat → portrait-message-ID map to disk so
-// a restart can still delete a stale portrait when its replacement is
-// posted. Best-effort: a failed write is logged, not fatal.
-func persistPortraits(lastPortrait map[int64]int) {
-	if err := savePortraitState(lastPortrait); err != nil {
+// persistPortraits writes the chat → portrait-message-ID map so a restart
+// can still delete a stale portrait when its replacement is posted.
+// Best-effort: a failed write is logged, not fatal.
+func (m *Manager) persistPortraits(ctx context.Context, lastPortrait map[int64]int) {
+	if err := savePortraitState(ctx, m.store, lastPortrait); err != nil {
 		log.Printf("[telegram] save portrait state: %v", err)
 	}
 }

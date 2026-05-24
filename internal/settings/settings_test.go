@@ -4,12 +4,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
-
-	"diesel/internal/util"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -316,15 +313,19 @@ func TestFetchModelContextLength_BlankInputs(t *testing.T) {
 	assert.Equal(t, 0, FetchModelContextLength("http://x", "", "  "))
 }
 
-func TestAppSettings_SaveLoad_RoundTrip(t *testing.T) {
-	// Redirect the config path to a fresh tempdir so the test doesn't
-	// clobber the user's real settings.
-	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", dir) // covers Linux
-	// On macOS UserConfigDir uses HOME/Library/Application Support; on
-	// Windows it uses APPDATA. Override both so the test is portable.
-	t.Setenv("HOME", dir)
-	t.Setenv("APPDATA", dir)
+// Load/Save delegate to the backend wired by SetBackend. The settings
+// package can't import the storage layer (storage imports settings — a
+// direct dependency back would be an import cycle), so these tests use an
+// in-memory backend. The real SQLite-backed round-trip is covered by the
+// storage package's own tests.
+
+func TestSetBackend_SaveLoadRoundTrip(t *testing.T) {
+	var stored AppSettings
+	SetBackend(
+		func() AppSettings { return stored },
+		func(s AppSettings) error { stored = s; return nil },
+	)
+	t.Cleanup(func() { SetBackend(nil, nil) })
 
 	original := AppSettings{
 		Theme:           "Light",
@@ -341,64 +342,15 @@ func TestAppSettings_SaveLoad_RoundTrip(t *testing.T) {
 		ComfyUIEndpoint: "http://comfy.test:8188",
 	}
 	require.NoError(t, original.Save())
-
-	loaded := Load()
-	assert.Equal(t, original.Theme, loaded.Theme)
-	assert.Equal(t, original.APIEndpoint, loaded.APIEndpoint)
-	assert.Equal(t, original.APIKey, loaded.APIKey)
-	assert.Equal(t, original.Model, loaded.Model)
-	assert.Equal(t, original.SystemPrompt, loaded.SystemPrompt)
-	assert.Equal(t, original.HistoryMessages, loaded.HistoryMessages)
-	assert.Equal(t, original.EnableTTS, loaded.EnableTTS)
-	assert.Equal(t, original.TTSModel, loaded.TTSModel)
-	assert.Equal(t, original.TTSVoice, loaded.TTSVoice)
-	assert.Equal(t, original.EnableImageGen, loaded.EnableImageGen)
-	assert.Equal(t, original.ComfyUIEndpoint, loaded.ComfyUIEndpoint)
+	assert.Equal(t, original, Load())
 }
 
-func TestLoad_MissingFileReturnsDefaults(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", dir)
-	t.Setenv("HOME", dir)
-	t.Setenv("APPDATA", dir)
-
-	got := Load()
-	assert.Equal(t, Default(), got)
+func TestLoad_NoBackendReturnsDefaults(t *testing.T) {
+	SetBackend(nil, nil)
+	assert.Equal(t, Default(), Load())
 }
 
-func TestLoad_CorruptFileReturnsDefaults(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", dir)
-	t.Setenv("HOME", dir)
-	t.Setenv("APPDATA", dir)
-
-	path, err := Path()
-	require.NoError(t, err)
-	require.NoError(t, util.AtomicWriteFile(path, []byte("{this is not json"), 0o600))
-
-	got := Load()
-	// Defaults restored on parse failure — we don't want to wipe their
-	// file (Save would do that on a subsequent save) but loading is
-	// best-effort. Verify the in-memory struct is sane.
-	assert.Equal(t, Default().APIEndpoint, got.APIEndpoint)
-}
-
-// Sanity: a saved settings file is valid JSON and parses against the
-// AppSettings shape — guards against future field additions that break
-// MarshalIndent (e.g. unexported types sneaking in).
-func TestAppSettings_Save_ProducesValidJSON(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", dir)
-	t.Setenv("HOME", dir)
-	t.Setenv("APPDATA", dir)
-
-	s := Default()
-	require.NoError(t, s.Save())
-	path, err := Path()
-	require.NoError(t, err)
-
-	raw, err := os.ReadFile(path)
-	require.NoError(t, err)
-	var into AppSettings
-	require.NoError(t, json.Unmarshal(raw, &into))
+func TestSave_NoBackendIsNoOp(t *testing.T) {
+	SetBackend(nil, nil)
+	require.NoError(t, Default().Save())
 }

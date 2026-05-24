@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"log"
 	"os"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -16,6 +18,7 @@ import (
 	"diesel/internal/server"
 	"diesel/internal/settings"
 	"diesel/internal/sms"
+	"diesel/internal/storage"
 	"diesel/internal/telegram"
 	"diesel/internal/tracing"
 	"diesel/internal/tts"
@@ -37,7 +40,26 @@ const (
 // routing and the busy-broadcast filter both know who "the desktop" is.
 const desktopOrigin = "desktop"
 
+// init pins the main goroutine to the process's main OS thread. macOS
+// Cocoa requires every UI call — including the QApplication constructor
+// and its menu setup — to run on that thread; without this the Go
+// scheduler can migrate main() onto another thread (more likely now that
+// startup opens the database first) and Qt aborts with an "API misuse:
+// setting the main menu on a non-main thread" exception.
+func init() {
+	runtime.LockOSThread()
+}
+
 func main() {
+	// -data-dir overrides where the database and character image live;
+	// blank keeps the platform user-config default. Parsed first so it's
+	// in effect before anything resolves a config path.
+	dataDir := flag.String("data-dir", "", "directory for Diesel's data (database, character image); defaults to the OS user config dir")
+	flag.Parse()
+	if *dataDir != "" {
+		util.SetConfigDir(*dataDir)
+	}
+
 	// OpenTelemetry: a no-op unless OTEL_EXPORTER_OTLP_ENDPOINT (or the
 	// trace-specific override) is set in the environment. Shutdown flushes
 	// any in-flight spans on exit; bound to a 5 s deadline so a stuck
@@ -54,9 +76,36 @@ func main() {
 		}()
 	}
 
-	// Hub owns the conversation. Started before any UI so the on-disk
+	// SQLite-backed persistence: conversation history, the settings blob,
+	// and each bridge's bookkeeping all live in one database file. Opened
+	// before anything reads settings or history.
+	dbPath, err := util.ConfigFilePath("diesel.db")
+	if err != nil {
+		log.Fatalf("[storage] config path: %v", err)
+	}
+	store, err := storage.Open(dbPath)
+	if err != nil {
+		log.Fatalf("[storage] open: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+	// Wire the settings package to the database. settings can't import
+	// storage (storage imports settings), so persistence is injected.
+	settings.SetBackend(
+		func() settings.AppSettings {
+			s, err := store.LoadSettings(context.Background())
+			if err != nil {
+				log.Printf("[settings] load: %v", err)
+			}
+			return s
+		},
+		func(s settings.AppSettings) error {
+			return store.SaveSettings(context.Background(), s)
+		},
+	)
+
+	// Hub owns the conversation. Started before any UI so the persisted
 	// history is loaded by the time Qt is ready to paint it.
-	h := hub.New()
+	h := hub.New(store)
 	h.Start(context.Background())
 
 	// HTTP server. Wired up before the window opens so it's reachable
@@ -67,13 +116,13 @@ func main() {
 
 	// SMS bridge over Twilio. Same Apply/Stop shape as the HTTP server
 	// — opt-in via settings, hot-reapplied on every Save.
-	smsMgr := sms.New(h)
+	smsMgr := sms.New(h, store)
 	smsMgr.Apply(settings.Load())
 	defer smsMgr.Stop()
 
 	// Telegram bot bridge. Same Apply/Stop shape — opt-in, hot-reapplied
 	// on every Save.
-	tgMgr := telegram.New(h)
+	tgMgr := telegram.New(h, store)
 	tgMgr.Apply(settings.Load())
 	defer tgMgr.Stop()
 
