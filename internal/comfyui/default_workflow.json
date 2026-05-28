@@ -27,10 +27,10 @@
   },
   "6": {
     "inputs": {
-      "text": "3d, solo, 1man, dubusi, a fat man with a braided beard and short green hair and green eyes while standing, looking at viewer, belly,\n\ndaytime a living room with a red couch and television in front of windows to a suburban backyard, completely nude, naked, no clothing, small short flaccid penis with foreskin, green pubic hair, green chest hair, flushed cheeks, half-lidded eyes, parted lips, biting lower lip, aroused expression, smirk",
+      "text": "3d, solo, 1man, dubusi, ochman, fat, older man, hairy, braided beard, short green hair, green eyes, standing, looking at viewer, big belly, from poland, beard braid, forehead wrinkles, green leg hair, arm hair, small nipples, testicles, eyes, mustache,\n\ndaytime, living room, red couch, television, windows to a suburban backyard,naked, uncut, small penis, foreskin, green pubic hair, green chest hair, flushed cheeks, half-lidded eyes, parted lips, biting lower lip, aroused expression, smirk",
       "clip": [
-        "4",
-        1
+        "67",
+        0
       ]
     },
     "class_type": "CLIPTextEncode",
@@ -40,10 +40,10 @@
   },
   "7": {
     "inputs": {
-      "text": "woman, girl, shirt logo, feminine, wide hips, muscular, long penis",
+      "text": "woman, girl, shirt logo, feminine, wide hips, muscular, glans penis, erection",
       "clip": [
-        "4",
-        1
+        "67",
+        0
       ]
     },
     "class_type": "CLIPTextEncode",
@@ -51,49 +51,10 @@
       "title": "CLIP Text Encode (Prompt)"
     }
   },
-  "10": {
-    "inputs": {
-      "add_noise": "enable",
-      "noise_seed": 312122644965112,
-      "steps": [
-        "57",
-        0
-      ],
-      "cfg": 4,
-      "sampler_name": "euler_ancestral",
-      "scheduler": "normal",
-      "start_at_step": 0,
-      "end_at_step": [
-        "57",
-        0
-      ],
-      "return_with_leftover_noise": "enable",
-      "model": [
-        "54",
-        0
-      ],
-      "positive": [
-        "6",
-        0
-      ],
-      "negative": [
-        "7",
-        0
-      ],
-      "latent_image": [
-        "5",
-        0
-      ]
-    },
-    "class_type": "KSamplerAdvanced",
-    "_meta": {
-      "title": "KSampler (Advanced) - BASE"
-    }
-  },
   "17": {
     "inputs": {
       "samples": [
-        "10",
+        "70",
         0
       ],
       "vae": [
@@ -106,20 +67,6 @@
       "title": "VAE Decode"
     }
   },
-  "53": {
-    "inputs": {
-      "lora_name": "il\\characters\\CEDDV8PWP5T8XNTS170HMHJRQ0.safetensors",
-      "strength_model": 1,
-      "model": [
-        "4",
-        0
-      ]
-    },
-    "class_type": "LoraLoaderModelOnly",
-    "_meta": {
-      "title": "Load LoRA"
-    }
-  },
   "54": {
     "inputs": {
       "switch": [
@@ -127,31 +74,17 @@
         0
       ],
       "on_false": [
-        "53",
+        "65",
         0
       ],
       "on_true": [
-        "55",
+        "66",
         0
       ]
     },
     "class_type": "ComfySwitchNode",
     "_meta": {
       "title": "Nudity Switch"
-    }
-  },
-  "55": {
-    "inputs": {
-      "lora_name": "il\\concept\\flaccid_uncut.safetensors",
-      "strength_model": 1,
-      "model": [
-        "53",
-        0
-      ]
-    },
-    "class_type": "LoraLoaderModelOnly",
-    "_meta": {
-      "title": "Load LoRA"
     }
   },
   "56": {
@@ -165,7 +98,7 @@
   },
   "57": {
     "inputs": {
-      "value": 10
+      "value": 12
     },
     "class_type": "PrimitiveInt",
     "_meta": {
@@ -200,6 +133,129 @@
     "class_type": "PreviewImage",
     "_meta": {
       "title": "Preview Image"
+    }
+  },
+  "63": {
+    "inputs": {
+      "lora_name": "il\\characters\\CEDDV8PWP5T8XNTS170HMHJRQ0.safetensors",
+      "strength_model": 1,
+      "strength_clip": 1,
+      "model": [
+        "4",
+        0
+      ],
+      "clip": [
+        "4",
+        1
+      ]
+    },
+    "class_type": "LoraLoader",
+    "_meta": {
+      "title": "Load LoRA (Model and CLIP)"
+    }
+  },
+  "65": {
+    "inputs": {
+      "lora_name": "il\\ochman\\lora.safetensors",
+      "strength_model": 1,
+      "strength_clip": 1,
+      "model": [
+        "63",
+        0
+      ],
+      "clip": [
+        "63",
+        1
+      ]
+    },
+    "class_type": "LoraLoader",
+    "_meta": {
+      "title": "Load LoRA (Model and CLIP)"
+    }
+  },
+  "66": {
+    "inputs": {
+      "lora_name": "il\\concept\\flaccid_uncut.safetensors",
+      "strength_model": 1.1,
+      "strength_clip": 1.1,
+      "model": [
+        "65",
+        0
+      ],
+      "clip": [
+        "65",
+        1
+      ]
+    },
+    "class_type": "LoraLoader",
+    "_meta": {
+      "title": "Load LoRA (Model and CLIP)"
+    }
+  },
+  "67": {
+    "inputs": {
+      "stop_at_clip_layer": -2,
+      "clip": [
+        "68",
+        0
+      ]
+    },
+    "class_type": "CLIPSetLastLayer",
+    "_meta": {
+      "title": "CLIP Set Last Layer"
+    }
+  },
+  "68": {
+    "inputs": {
+      "switch": [
+        "56",
+        0
+      ],
+      "on_false": [
+        "65",
+        1
+      ],
+      "on_true": [
+        "66",
+        1
+      ]
+    },
+    "class_type": "ComfySwitchNode",
+    "_meta": {
+      "title": "Switch"
+    }
+  },
+  "70": {
+    "inputs": {
+      "seed": 285296882691731,
+      "steps": [
+        "57",
+        0
+      ],
+      "cfg": 4,
+      "sampler_name": "euler_ancestral",
+      "scheduler": "karras",
+      "denoise": 0.9,
+      "model": [
+        "54",
+        0
+      ],
+      "positive": [
+        "6",
+        0
+      ],
+      "negative": [
+        "7",
+        0
+      ],
+      "latent_image": [
+        "5",
+        0
+      ]
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "KSampler"
     }
   }
 }

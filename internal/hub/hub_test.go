@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"diesel/internal/comfyui"
 	"diesel/internal/storage"
 
 	"github.com/stretchr/testify/assert"
@@ -142,21 +143,20 @@ func TestSend_DetachesCallerContext(t *testing.T) {
 }
 
 // TestComposeImagePrompt covers the three splice paths — clothing
-// when dressed, nudity when naked, emotion always.
+// when dressed, nudity when naked, emotion always — by asserting the
+// real comfyui constants land in the composed string.
 func TestComposeImagePrompt(t *testing.T) {
-	s := settingsFixture()
-
-	got := composeImagePrompt(s, "happy", false)
-	assert.Contains(t, got, "BASE")
-	assert.Contains(t, got, "CLOTHING")
+	got := composeImagePrompt("happy", false)
+	assert.Contains(t, got, comfyui.ImagePrompt)
+	assert.Contains(t, got, comfyui.ImageClothing)
 	assert.Contains(t, got, "warm smile")
-	assert.NotContains(t, got, "NUDE")
+	assert.NotContains(t, got, comfyui.ImageNudity)
 
-	got = composeImagePrompt(s, "happy", true)
-	assert.Contains(t, got, "NUDE")
-	assert.NotContains(t, got, "CLOTHING")
+	got = composeImagePrompt("happy", true)
+	assert.Contains(t, got, comfyui.ImageNudity)
+	assert.NotContains(t, got, comfyui.ImageClothing)
 
-	got = composeImagePrompt(s, "neutral", false)
-	// neutral emotion = empty splice, prompt stays minimal
-	assert.Equal(t, "BASE, CLOTHING", got)
+	got = composeImagePrompt("neutral", false)
+	// neutral emotion = empty fragment, prompt is base + clothing only.
+	assert.Equal(t, comfyui.ImagePrompt+", "+comfyui.ImageClothing, got)
 }

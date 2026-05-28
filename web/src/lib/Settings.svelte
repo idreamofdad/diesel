@@ -384,18 +384,6 @@
             <label>Steps
               <input type="number" min="1" max="200" bind:value={settings.image_steps} />
             </label>
-            <label>Image prompt
-              <textarea bind:value={settings.image_prompt} rows="6"></textarea>
-            </label>
-            <label>Clothing
-              <textarea bind:value={settings.image_clothing} rows="2"></textarea>
-            </label>
-            <label>Nudity
-              <textarea bind:value={settings.image_nudity} rows="2"></textarea>
-            </label>
-            <label>Negative prompt
-              <textarea bind:value={settings.image_negative_prompt} rows="4"></textarea>
-            </label>
             <div class="test-row">
               <button onclick={() => runTest('image')} disabled={imgTesting}>Test connection</button>
               <span class="status">{imgStatus}</span>

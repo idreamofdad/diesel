@@ -521,7 +521,7 @@ func (h *Hub) renderPortrait(ctx context.Context, s settings.AppSettings, reply 
 	if !s.EnableImageGen {
 		return
 	}
-	prompt := composeImagePrompt(s, reply.Emotion, reply.Naked)
+	prompt := composeImagePrompt(reply.Emotion, reply.Naked)
 	// Stream sampler steps and intermediate preview frames as
 	// EventPortraitProgress so subscribers can paint the image as it
 	// develops. Preview bytes go into the previews cache and a
@@ -551,7 +551,7 @@ func (h *Hub) renderPortrait(ctx context.Context, s settings.AppSettings, reply 
 		}
 		h.broadcast(ev)
 	}
-	png, err := comfyui.Generate(ctx, s, prompt, s.ImageNegativePrompt, reply.Naked, landscape, onProgress)
+	png, err := comfyui.Generate(ctx, s, prompt, reply.Naked, landscape, onProgress)
 	if err != nil || len(png) == 0 {
 		return
 	}
@@ -563,21 +563,18 @@ func (h *Hub) renderPortrait(ctx context.Context, s settings.AppSettings, reply 
 	ev.PortraitURL = "/api/v1/portrait/" + id
 }
 
-// composeImagePrompt assembles the image prompt the same way the
-// previous main.go code did — base prompt, clothing or nudity splice,
-// then the emotion fragment. Kept here so the hub remains the single
-// owner of the pipeline; main.go no longer needs to know the recipe.
-func composeImagePrompt(s settings.AppSettings, emotion string, naked bool) string {
-	prompt := trimSpace(s.ImagePrompt)
+// composeImagePrompt assembles the image prompt from comfyui's hardcoded
+// base, the clothing or nudity splice, and the chat-driven emotion
+// fragment. Lives in hub because it's the only place that knows both
+// halves of the recipe — comfyui owns the base/clothing/nudity strings,
+// chat owns the emotion lookup.
+func composeImagePrompt(emotion string, naked bool) string {
+	prompt := comfyui.ImagePrompt
 	switch {
 	case naked:
-		if frag := trimSpace(s.ImageNudity); frag != "" {
-			prompt = prompt + ", " + frag
-		}
+		prompt = prompt + ", " + comfyui.ImageNudity
 	default:
-		if frag := trimSpace(s.ImageClothing); frag != "" {
-			prompt = prompt + ", " + frag
-		}
+		prompt = prompt + ", " + comfyui.ImageClothing
 	}
 	if frag := chat.EmotionPrompts[trimSpace(emotion)]; frag != "" {
 		prompt = prompt + ", " + frag

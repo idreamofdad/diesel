@@ -40,31 +40,6 @@ Diesel: Fair — thanks for telling me. I'll dial it back. Anything specific tha
 
 # Backstory`
 
-// imagePrompt is the default Stable Diffusion prompt used to render a
-// portrait of Diesel through ComfyUI. It's tuned for the checkpoint baked
-// into default_workflow.json; like systemPrompt it's a starting point the
-// user can rewrite in the Settings dialog. Clothing is split out into
-// imageClothing so the portrait pipeline can swap it for nudityPrompt
-// when the chat reply flags the scene as naked.
-const imagePrompt = `3d, solo, 1man, dubusi, a fat man with a braided beard and short green hair and green eyes, beach, standing`
-
-// imageClothing is spliced into the image prompt to describe what Diesel
-// is wearing. Kept separate from imagePrompt so the portrait pipeline can
-// drop it (and substitute nudityPrompt) when the chat reply's Naked flag
-// is true — otherwise a hard-coded outfit in the base prompt fights the
-// nudity splice and the renderer ends up confused.
-const imageClothing = `wearing a blue t-shirt and blue jeans`
-
-// imageNegativePrompt steers the renderer away from the usual diffusion
-// failure modes. Also user-editable in Settings.
-const imageNegativePrompt = `woman, girl, shirt logo, feminine, wide hips`
-
-// nudityPrompt is the default fragment spliced into the image prompt when
-// the structured reply's Naked flag is true. The active value lives in
-// AppSettings.ImageNudity so the user can retune it from Settings; this
-// constant is just the seed for a fresh install.
-const nudityPrompt = "completely nude, naked, no clothing"
-
 // AppSettings is what we persist to disk.
 //
 // The API key sits in plaintext JSON here for simplicity. For real use, move
@@ -111,16 +86,13 @@ type AppSettings struct {
 	SaveToDisk   bool   `json:"save_to_disk"`
 	// Image generation via a local ComfyUI server. EnableImageGen gates the
 	// whole feature so a fresh install without ComfyUI stays inert. When
-	// on, a fresh portrait is rendered after every assistant reply using
-	// ImagePrompt / ImageNegativePrompt. The checkpoint and all other
-	// models live in the bundled workflow (default_workflow.json), not
-	// here — there's no model picker.
-	EnableImageGen      bool   `json:"enable_image_gen"`
-	ComfyUIEndpoint     string `json:"comfyui_endpoint"`
-	ImagePrompt         string `json:"image_prompt"`
-	ImageClothing       string `json:"image_clothing"`
-	ImageNudity         string `json:"image_nudity"`
-	ImageNegativePrompt string `json:"image_negative_prompt"`
+	// on, a fresh portrait is rendered after every assistant reply; the
+	// prompt fragments and checkpoint all live in the bundled workflow
+	// (default_workflow.json) and comfyui's hardcoded constants, so the
+	// user only chooses whether the feature is on and where to reach the
+	// server.
+	EnableImageGen  bool   `json:"enable_image_gen"`
+	ComfyUIEndpoint string `json:"comfyui_endpoint"`
 	// ImageSteps overrides the sampler step count in the bundled workflow.
 	// Higher = slower but typically sharper. 0 (or a workflow without the
 	// "Steps" PrimitiveInt node) leaves whatever the workflow specifies in
@@ -203,12 +175,8 @@ func Default() AppSettings {
 		// Image generation defaults off — it needs a separate ComfyUI
 		// server, so opting in is deliberate. The endpoint is ComfyUI's
 		// stock local address so enabling it usually "just works".
-		ComfyUIEndpoint:     "http://127.0.0.1:8188",
-		ImagePrompt:         imagePrompt,
-		ImageClothing:       imageClothing,
-		ImageNudity:         nudityPrompt,
-		ImageNegativePrompt: imageNegativePrompt,
-		ImageSteps:          10,
+		ComfyUIEndpoint: "http://127.0.0.1:8188",
+		ImageSteps:      10,
 		// Server defaults off — opening a port is opt-in. 7777 picked
 		// because it's well outside reserved ranges and unlikely to
 		// collide with another local service. Loopback-only by default;

@@ -999,22 +999,6 @@ func showSettingsDialog(parent *qt.QWidget, srvMgr *server.Manager, smsMgr *sms.
 	comfyEndpoint := qt.NewQLineEdit3(current.ComfyUIEndpoint)
 	comfyEndpoint.SetPlaceholderText("http://127.0.0.1:8188")
 
-	imagePromptEdit := qt.NewQTextEdit(nil)
-	imagePromptEdit.SetPlaceholderText("How Diesel should look…")
-	imagePromptEdit.SetPlainText(current.ImagePrompt)
-	imagePromptEdit.SetMinimumHeight(240)
-	imageClothingEdit := qt.NewQTextEdit(nil)
-	imageClothingEdit.SetPlaceholderText("e.g. wearing a blue t-shirt and blue jeans")
-	imageClothingEdit.SetPlainText(current.ImageClothing)
-	imageClothingEdit.SetMinimumHeight(72)
-	imageNudityEdit := qt.NewQTextEdit(nil)
-	imageNudityEdit.SetPlaceholderText("e.g. completely nude, naked, no clothing")
-	imageNudityEdit.SetPlainText(current.ImageNudity)
-	imageNudityEdit.SetMinimumHeight(72)
-	imageNegEdit := qt.NewQTextEdit(nil)
-	imageNegEdit.SetPlaceholderText("things to keep out of the image")
-	imageNegEdit.SetPlainText(current.ImageNegativePrompt)
-	imageNegEdit.SetMinimumHeight(180)
 	imageSteps := qt.NewQSpinBox(nil)
 	imageSteps.SetRange(1, 200)
 	imageSteps.SetSingleStep(1)
@@ -1185,10 +1169,6 @@ func showSettingsDialog(parent *qt.QWidget, srvMgr *server.Manager, smsMgr *sms.
 	imgForm.AddRowWithWidget(enableImageGen.QWidget)
 	imgForm.AddRow3("ComfyUI endpoint:", comfyEndpoint.QWidget)
 	imgForm.AddRow3("Steps:", imageSteps.QWidget)
-	imgForm.AddRow3("Image prompt:", imagePromptEdit.QWidget)
-	imgForm.AddRow3("Clothing:", imageClothingEdit.QWidget)
-	imgForm.AddRow3("Nudity:", imageNudityEdit.QWidget)
-	imgForm.AddRow3("Negative prompt:", imageNegEdit.QWidget)
 	imgForm.AddRowWithLayout(imgTestRow.QLayout)
 
 	// Server tab.
@@ -1278,10 +1258,6 @@ func showSettingsDialog(parent *qt.QWidget, srvMgr *server.Manager, smsMgr *sms.
 			SaveToDisk:              autoSave.IsChecked(),
 			EnableImageGen:          enableImageGen.IsChecked(),
 			ComfyUIEndpoint:         comfyEndpoint.Text(),
-			ImagePrompt:             imagePromptEdit.ToPlainText(),
-			ImageClothing:           imageClothingEdit.ToPlainText(),
-			ImageNudity:             imageNudityEdit.ToPlainText(),
-			ImageNegativePrompt:     imageNegEdit.ToPlainText(),
 			ImageSteps:              imageSteps.Value(),
 			EnableServer:            enableServer.IsChecked(),
 			ServerExposeNetwork:     serverExpose.IsChecked(),

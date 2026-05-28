@@ -39,6 +39,27 @@ import (
 //go:embed default_workflow.json
 var defaultWorkflow string
 
+// ImagePrompt is the base positive prompt describing how Diesel should
+// look. Tuned for the checkpoint baked into default_workflow.json. The
+// hub splices ImageClothing or ImageNudity onto the end of this before
+// handing it to Generate, then appends an emotion fragment from
+// chat.EmotionPrompts.
+const ImagePrompt = `solo, dubusi, ochman, fat man, hairy, braided beard, short green hair, green eyes, living room`
+
+// ImageClothing is appended to ImagePrompt when the structured reply's
+// Naked flag is false. Kept separate so the splice can swap it for
+// ImageNudity — a hard-coded outfit in the base prompt would fight the
+// nudity splice and confuse the renderer.
+const ImageClothing = `blue t-shirt, blue jeans,`
+
+// ImageNudity is appended to ImagePrompt in place of ImageClothing when
+// the reply's Naked flag is true.
+const ImageNudity = `naked, small penis, flaccid, uncut, uncircumcised, foreskin, green pubic hair, green chest hair, small nipples,`
+
+// ImageNegativePrompt steers the renderer away from the usual diffusion
+// failure modes. Read directly by Generate.
+const ImageNegativePrompt = `woman, girl, shirt logo, feminine, wide hips`
+
 // workflowNode is one entry of a ComfyUI API-format graph. Inputs is left
 // as a free-form map because node schemas vary wildly and we only ever
 // touch a handful of known keys — but it's a reference type, so mutating
@@ -258,7 +279,8 @@ type Progress struct {
 // intermediate preview frames as binary messages. It runs on the
 // goroutine driving Generate, so a Qt-thread caller should funnel
 // updates through a channel.
-func Generate(ctx context.Context, s settings.AppSettings, positive, negative string, naked, landscape bool, onProgress func(Progress)) ([]byte, error) {
+func Generate(ctx context.Context, s settings.AppSettings, positive string, naked, landscape bool, onProgress func(Progress)) ([]byte, error) {
+	negative := ImageNegativePrompt
 	ctx, span := tracing.StartSpan(ctx, "image.generate",
 		attribute.Int("image.prompt.length", len(positive)),
 		attribute.Int("image.negative_prompt.length", len(negative)),
@@ -278,14 +300,12 @@ func Generate(ctx context.Context, s settings.AppSettings, positive, negative st
 		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
-	// Multi-line user settings (Settings has QTextEdits for the base
-	// prompt, clothing, nudity, and negative fragments) come through with
-	// embedded newlines once spliced together. CLIPTextEncode tokenizes
-	// each line independently, which drops cross-line concept blending
-	// and tends to leave the trailing fragments under-weighted, so flatten
-	// to a single line before handing the prompts to the rewriter.
+	// The composed positive prompt arrives with embedded newlines from
+	// the hub's splice path. CLIPTextEncode tokenizes each line
+	// independently, which drops cross-line concept blending and tends
+	// to leave trailing fragments under-weighted, so flatten to a single
+	// line before handing the prompts to the rewriter.
 	positive = strings.ReplaceAll(positive, "\n", " ")
-	negative = strings.ReplaceAll(negative, "\n", " ")
 
 	// Parse a fresh graph per call — concurrent generations must never
 	// share the mutable node maps. Wrapped in its own span so the parse +
