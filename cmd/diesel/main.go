@@ -15,6 +15,7 @@ import (
 	"diesel/internal/chat"
 	"diesel/internal/comfyui"
 	"diesel/internal/hub"
+	"diesel/internal/matrix"
 	"diesel/internal/server"
 	"diesel/internal/settings"
 	"diesel/internal/sms"
@@ -125,6 +126,13 @@ func main() {
 	tgMgr := telegram.New(h, store)
 	tgMgr.Apply(settings.Load())
 	defer tgMgr.Stop()
+
+	// Matrix bridge. Same Apply/Stop shape — opt-in, hot-reapplied on
+	// every Save. Shares diesel.db with the rest of the persistence
+	// layer; mautrix-go manages its own crypto/state tables there.
+	mxMgr := matrix.New(h, store)
+	mxMgr.Apply(settings.Load())
+	defer mxMgr.Stop()
 
 	qt.NewQApplication(os.Args)
 
@@ -635,7 +643,7 @@ func main() {
 	prefsAction := qt.NewQAction2("Settings…")
 	prefsAction.SetMenuRole(qt.QAction__PreferencesRole)
 	prefsAction.OnTriggered(func() {
-		showSettingsDialog(window.QWidget, srvMgr, smsMgr, tgMgr)
+		showSettingsDialog(window.QWidget, srvMgr, smsMgr, tgMgr, mxMgr)
 	})
 	fileMenu.AddAction(prefsAction)
 
@@ -647,6 +655,7 @@ func main() {
 	srvMgr.Stop()
 	smsMgr.Stop()
 	tgMgr.Stop()
+	mxMgr.Stop()
 	h.Unsubscribe(desktopOrigin)
 	h.Stop()
 }
@@ -694,7 +703,7 @@ func showPortraitFullSize(parent *qt.QWidget, png []byte) {
 // showSettingsDialog presents a modal settings dialog populated from the
 // on-disk settings file. Save writes them back and applies any server
 // or SMS config changes to the respective managers; Cancel discards.
-func showSettingsDialog(parent *qt.QWidget, srvMgr *server.Manager, smsMgr *sms.Manager, tgMgr *telegram.Manager) {
+func showSettingsDialog(parent *qt.QWidget, srvMgr *server.Manager, smsMgr *sms.Manager, tgMgr *telegram.Manager, mxMgr *matrix.Manager) {
 	current := settings.Load()
 
 	dlg := qt.NewQDialog(parent)
@@ -1115,6 +1124,33 @@ func showSettingsDialog(parent *qt.QWidget, srvMgr *server.Manager, smsMgr *sms.
 		tgTestBtn.SetEnabled(true)
 	})
 
+	// ─── Matrix tab ─────────────────────────────────────────────────────
+	// /sync long-poll bridge with E2EE — when on, the bot logs in as
+	// its configured MXID and operates in any room MatrixAllowedUser
+	// invites it into, provided the room has exactly two members.
+	// Password is masked. Homeserver URL is discovered from the bot
+	// MXID's domain via .well-known, so the dialog doesn't expose it.
+	enableMatrix := qt.NewQCheckBox3("Enable Matrix bot (E2EE sync)")
+	enableMatrix.SetChecked(current.EnableMatrix)
+	mxBotID := qt.NewQLineEdit3(current.MatrixBotUserID)
+	mxBotID.SetPlaceholderText("@diesel:matrix.org — the bot's own MXID")
+	mxPassword := qt.NewQLineEdit3(current.MatrixPassword)
+	mxPassword.SetEchoMode(qt.QLineEdit__Password)
+	mxPassword.SetPlaceholderText("(password for the bot account)")
+	mxAllowed := qt.NewQLineEdit3(current.MatrixAllowedUser)
+	mxAllowed.SetPlaceholderText("@you:matrix.org — the one allowed user")
+	mxStatus := qt.NewQLabel5(mxMgr.Status(), nil)
+	mxStatus.SetWordWrap(true)
+	mxStatus.SetStyleSheet("color: #aaa;")
+	mxTestRow, mxTestBtn, mxTestStatus := makeTestRow("Test connection")
+	mxTestBtn.OnClicked(func() {
+		mxTestBtn.SetEnabled(false)
+		mxTestStatus.SetText("Testing…")
+		qt.QCoreApplication_ProcessEvents()
+		mxTestStatus.SetText(matrix.TestConnection(mxBotID.Text(), mxPassword.Text()))
+		mxTestBtn.SetEnabled(true)
+	})
+
 	// LLM tab.
 	llmForm, llmTab := newTab()
 	llmForm.AddRow3("API endpoint:", endpoint.QWidget)
@@ -1182,6 +1218,15 @@ func showSettingsDialog(parent *qt.QWidget, srvMgr *server.Manager, smsMgr *sms.
 	tgForm.AddRow3("Status:", tgStatus.QWidget)
 	tgForm.AddRowWithLayout(tgTestRow.QLayout)
 
+	// Matrix tab.
+	mxForm, mxTab := newTab()
+	mxForm.AddRowWithWidget(enableMatrix.QWidget)
+	mxForm.AddRow3("Bot user ID:", mxBotID.QWidget)
+	mxForm.AddRow3("Password:", mxPassword.QWidget)
+	mxForm.AddRow3("Allowed user:", mxAllowed.QWidget)
+	mxForm.AddRow3("Status:", mxStatus.QWidget)
+	mxForm.AddRowWithLayout(mxTestRow.QLayout)
+
 	// Appearance.
 	apForm, apTab := newTab()
 	apForm.AddRow3("Theme:", theme.QWidget)
@@ -1195,6 +1240,7 @@ func showSettingsDialog(parent *qt.QWidget, srvMgr *server.Manager, smsMgr *sms.
 	tabs.AddTab(srvTab, "Server")
 	tabs.AddTab(smsTab, "SMS")
 	tabs.AddTab(tgTab, "Telegram")
+	tabs.AddTab(mxTab, "Matrix")
 	tabs.AddTab(apTab, "Appearance")
 	root.AddWidget2(tabs.QWidget, 1)
 
@@ -1250,6 +1296,10 @@ func showSettingsDialog(parent *qt.QWidget, srvMgr *server.Manager, smsMgr *sms.
 			EnableTelegram:          enableTelegram.IsChecked(),
 			TelegramBotToken:        tgToken.Text(),
 			TelegramAllowedUsername: strings.TrimSpace(tgUsername.Text()),
+			EnableMatrix:            enableMatrix.IsChecked(),
+			MatrixBotUserID:         strings.TrimSpace(mxBotID.Text()),
+			MatrixPassword:          mxPassword.Text(),
+			MatrixAllowedUser:       strings.TrimSpace(mxAllowed.Text()),
 		}
 		if err := updated.Save(); err != nil {
 			qt.QMessageBox_Warning(parent, "Settings",
@@ -1260,15 +1310,20 @@ func showSettingsDialog(parent *qt.QWidget, srvMgr *server.Manager, smsMgr *sms.
 		// label updates so the user sees a failed bind without closing
 		// the dialog.
 		serverStatus.SetText(srvMgr.Apply(updated))
-		// Apply the SMS and Telegram configs to their managers too —
-		// same shape, same "keep dialog open on failure" semantics.
+		// Apply the SMS, Telegram, and Matrix configs to their managers
+		// too — same shape, same "keep dialog open on failure"
+		// semantics. Matrix's Apply may take a moment because login
+		// happens on a background goroutine, but it returns the
+		// "Connecting…" status immediately so the dialog never blocks.
 		smsStatus.SetText(smsMgr.Apply(updated))
 		tgStatus.SetText(tgMgr.Apply(updated))
+		mxStatus.SetText(mxMgr.Apply(updated))
 		// If any apply failed, give the user a chance to fix it instead
 		// of closing the dialog out from under them.
 		if strings.HasPrefix(serverStatus.Text(), "✗") ||
 			strings.HasPrefix(smsStatus.Text(), "✗") ||
-			strings.HasPrefix(tgStatus.Text(), "✗") {
+			strings.HasPrefix(tgStatus.Text(), "✗") ||
+			strings.HasPrefix(mxStatus.Text(), "✗") {
 			return
 		}
 		dlg.Accept()

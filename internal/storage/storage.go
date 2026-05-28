@@ -79,3 +79,11 @@ func migrate(db *sql.DB) error {
 
 // Close closes the underlying connection pool.
 func (s *Store) Close() error { return s.db.Close() }
+
+// SQLDB returns the underlying connection pool so a sibling package can
+// share the database without re-opening it. Used by the Matrix bridge to
+// hand the pool to mautrix-go's dbutil, which manages its own crypto and
+// state-store tables alongside the goose-managed ones. The driver name
+// the bridge passes ("sqlite") matches what's registered by
+// modernc.org/sqlite.
+func (s *Store) SQLDB() *sql.DB { return s.db }

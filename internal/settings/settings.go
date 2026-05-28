@@ -166,6 +166,22 @@ type AppSettings struct {
 	EnableTelegram          bool   `json:"enable_telegram"`
 	TelegramBotToken        string `json:"telegram_bot_token"`
 	TelegramAllowedUsername string `json:"telegram_allowed_username"`
+	// Matrix bridge. EnableMatrix gates the whole feature so a fresh
+	// install with no account stays inert. The bot logs in as
+	// MatrixBotUserID (e.g. @diesel:matrix.org) with MatrixPassword and
+	// then operates in any room MatrixAllowedUser invites it into — but
+	// only when the room has exactly two members (Diesel + the allowed
+	// user). The password is retained so a server-side token revocation
+	// can be recovered from automatically; the bridge persists the
+	// resulting access token and device ID in storage. The homeserver
+	// URL is discovered from the bot MXID's domain via .well-known.
+	// Communication is E2EE — Olm/Megolm keys live in diesel.db
+	// alongside the rest of the bridge state, managed by mautrix-go's
+	// crypto helper. TOFU device trust, no interactive verification.
+	EnableMatrix      bool   `json:"enable_matrix"`
+	MatrixBotUserID   string `json:"matrix_bot_user_id"`
+	MatrixPassword    string `json:"matrix_password"`
+	MatrixAllowedUser string `json:"matrix_allowed_user"`
 }
 
 // Default returns the starting values used when no settings file exists
