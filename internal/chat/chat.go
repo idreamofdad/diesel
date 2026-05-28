@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"diesel/internal/comfyui"
 	"diesel/internal/settings"
 	"diesel/internal/tracing"
 	"diesel/internal/util"
@@ -52,10 +53,10 @@ const (
 // Message is the wire shape for an OpenAI-compatible /chat/completions
 // turn. We also keep a slice of these in memory (and on disk) as the
 // conversation log, stamped with the wall-clock time the turn occurred so
-// the model can reason about elapsed time. Timestamp and Emotion are
-// bookkeeping fields: Timestamp is folded into Content before each
-// request, and both are zeroed on the outgoing copy, so the wire body
-// stays a plain role/content pair.
+// the model can reason about elapsed time. Timestamp, Emotion, Naked,
+// Background, and Pose are bookkeeping fields: Timestamp is folded into
+// Content before each request, and all are zeroed on the outgoing copy,
+// so the wire body stays a plain role/content pair.
 type Message struct {
 	Role      string    `json:"role"`
 	Content   string    `json:"content"`
@@ -72,6 +73,16 @@ type Message struct {
 	// user/system messages and on assistant turns from older conversation
 	// files saved before this field existed.
 	Naked bool `json:"naked,omitempty"`
+	// Background is the scene slug the model chose for an assistant turn
+	// (one of Backgrounds). Stored so the next request can remind the
+	// model of where Diesel was last shown — see lastBackground. Empty
+	// on user/system messages and on older saved assistant turns.
+	Background string `json:"background,omitempty"`
+	// Pose is the body posture slug the model chose for an assistant
+	// turn (one of Poses). Stored so the next request can remind the
+	// model of Diesel's last posture — see lastPose. Empty on
+	// user/system messages and on older saved assistant turns.
+	Pose string `json:"pose,omitempty"`
 }
 
 // thinkBlock matches the <think>…</think> reasoning blocks some OSS models
@@ -102,12 +113,17 @@ type Usage struct {
 // portrait pipeline (it's appended as an expression to the image prompt).
 // Naked is a per-turn nudity flag the model can raise when it thinks the
 // scene calls for it — the portrait pipeline splices a nudity fragment
-// into the image prompt when true. The JSON tags match the response_format
-// schema below — don't rename either side in isolation.
+// into the image prompt when true. Background and Pose pick the scene
+// and posture the portrait pipeline composes around; both are constrained
+// to closed enums (Backgrounds, Poses) so a misspelling can't slip past
+// the matrix lookup. The JSON tags match the response_format schema
+// below — don't rename either side in isolation.
 type Reply struct {
-	Text    string `json:"text"`
-	Emotion string `json:"emotion"`
-	Naked   bool   `json:"naked"`
+	Text       string `json:"text"`
+	Emotion    string `json:"emotion"`
+	Naked      bool   `json:"naked"`
+	Background string `json:"background"`
+	Pose       string `json:"pose"`
 }
 
 // Emotions is the closed set the model is constrained to choose from.
@@ -116,6 +132,22 @@ type Reply struct {
 var Emotions = []string{
 	"happy", "sad", "angry", "surprised happy", "surprised shocked", "laughing",
 	"neutral", "amused", "annoyed", "thoughtful", "flirtatious", "horny",
+}
+
+// Backgrounds is the closed set of scene slugs the model can choose from.
+// Each entry must have a matching key in comfyui.ImageBackgrounds so the
+// portrait pipeline knows how to render it; chat_test guards the
+// correspondence.
+var Backgrounds = []string{
+	"living_room", "mechanics_shop", "forest_park", "pub",
+}
+
+// Poses is the closed set of body-posture slugs the model can choose
+// from. Each entry must have a matching key in comfyui.ImagePoseBases
+// AND a row in comfyui.ImagePoseAddons populated for every background;
+// chat_test guards both.
+var Poses = []string{
+	"standing", "sitting", "bent_over",
 }
 
 // lastEmotion returns the Emotion of the most recent assistant message
@@ -142,6 +174,29 @@ func lastNaked(history []Message) (bool, bool) {
 		}
 	}
 	return false, false
+}
+
+// lastBackground returns the Background slug of the most recent assistant
+// message in `history`, or "" when the conversation has no assistant turn
+// yet (or it predates the Background field). Used both to remind the model
+// of the prior scene and to inherit on the structured-reply fallback path.
+func lastBackground(history []Message) string {
+	for i := len(history) - 1; i >= 0; i-- {
+		if history[i].Role == RoleAssistant {
+			return history[i].Background
+		}
+	}
+	return ""
+}
+
+// lastPose mirrors lastBackground for the body-posture field.
+func lastPose(history []Message) string {
+	for i := len(history) - 1; i >= 0; i-- {
+		if history[i].Role == RoleAssistant {
+			return history[i].Pose
+		}
+	}
+	return ""
 }
 
 // Completion sends `history` (oldest→newest) to the configured endpoint
@@ -208,6 +263,26 @@ func Completion(ctx context.Context, s settings.AppSettings, history []Message) 
 			Content: "Your state of dress in your previous reply was: " + state,
 		})
 	}
+	// Remind the model of the scene and posture it last chose so the
+	// portrait pipeline doesn't teleport Diesel between locations or
+	// postures every turn. The human-readable label comes from the comfyui
+	// scene table — slugs like "mechanics_shop" would read oddly here.
+	if bg := lastBackground(history); bg != "" {
+		if spec, ok := comfyui.ImageBackgrounds[bg]; ok {
+			msgs = append(msgs, Message{
+				Role:    RoleSystem,
+				Content: "You were last shown in: " + spec.Label,
+			})
+		}
+	}
+	if p := lastPose(history); p != "" {
+		if spec, ok := comfyui.ImagePoseBases[p]; ok {
+			msgs = append(msgs, Message{
+				Role:    RoleSystem,
+				Content: "Your last pose was: " + spec.Label,
+			})
+		}
+	}
 	start := 0
 	switch {
 	case s.HistoryMessages <= 0:
@@ -224,12 +299,14 @@ func Completion(ctx context.Context, s settings.AppSettings, history []Message) 
 			m.Content = "[" + m.Timestamp.Format("2006-01-02 15:04:05 MST") + "] " + m.Content
 			m.Timestamp = time.Time{}
 		}
-		// Emotion and Naked are internal bookkeeping — strip them so the
-		// wire body stays a plain role/content pair. The model's prior
-		// expression and state of dress are fed back via the system
-		// messages above, not on the turn.
+		// Emotion, Naked, Background, and Pose are internal bookkeeping —
+		// strip them so the wire body stays a plain role/content pair.
+		// The model's prior expression, state of dress, scene, and posture
+		// are fed back via the system messages above, not on the turn.
 		m.Emotion = ""
 		m.Naked = false
+		m.Background = ""
+		m.Pose = ""
 		msgs = append(msgs, m)
 	}
 
@@ -255,8 +332,16 @@ func Completion(ctx context.Context, s settings.AppSettings, history []Message) 
 							"enum": Emotions,
 						},
 						"naked": map[string]any{"type": "boolean"},
+						"background": map[string]any{
+							"type": "string",
+							"enum": Backgrounds,
+						},
+						"pose": map[string]any{
+							"type": "string",
+							"enum": Poses,
+						},
 					},
-					"required":             []string{"text", "emotion", "naked"},
+					"required":             []string{"text", "emotion", "naked", "background", "pose"},
 					"additionalProperties": false,
 				},
 			},
@@ -346,22 +431,59 @@ func Completion(ctx context.Context, s settings.AppSettings, history []Message) 
 	// content with a neutral emotion so the chat keeps flowing.
 	var parsed Reply
 	if err := json.Unmarshal([]byte(content), &parsed); err != nil {
+		// On the fallback path, inherit scene/posture from the most
+		// recent assistant turn so a stray plain-text reply doesn't
+		// teleport Diesel back to the living room mid-conversation;
+		// only the very first turn lands on the hardcoded defaults.
+		bg := lastBackground(history)
+		if bg == "" {
+			bg = comfyui.DefaultImageBackground
+		}
+		pose := lastPose(history)
+		if pose == "" {
+			pose = comfyui.DefaultImagePose
+		}
 		span.SetAttributes(
 			attribute.Bool("llm.structured_reply", false),
 			attribute.Int("llm.reply.length", len(content)),
 			attribute.String("llm.reply.emotion", "neutral"),
+			attribute.String("llm.reply.background", bg),
+			attribute.String("llm.reply.pose", pose),
 		)
-		return Reply{Text: content, Emotion: "neutral"}, payload.Usage, nil
+		return Reply{
+			Text:       content,
+			Emotion:    "neutral",
+			Background: bg,
+			Pose:       pose,
+		}, payload.Usage, nil
 	}
 	parsed.Text = leadingTimestamp.ReplaceAllString(parsed.Text, "")
 	if parsed.Emotion == "" {
 		parsed.Emotion = "neutral"
+	}
+	// A compliant provider returns both fields populated, but a permissive
+	// one might omit them; fall back to the same inherit-then-default chain
+	// the parse-failure path uses so the composeImagePrompt call always has
+	// a valid slug to look up.
+	if parsed.Background == "" {
+		parsed.Background = lastBackground(history)
+		if parsed.Background == "" {
+			parsed.Background = comfyui.DefaultImageBackground
+		}
+	}
+	if parsed.Pose == "" {
+		parsed.Pose = lastPose(history)
+		if parsed.Pose == "" {
+			parsed.Pose = comfyui.DefaultImagePose
+		}
 	}
 	span.SetAttributes(
 		attribute.Bool("llm.structured_reply", true),
 		attribute.Int("llm.reply.length", len(parsed.Text)),
 		attribute.String("llm.reply.emotion", parsed.Emotion),
 		attribute.Bool("llm.reply.naked", parsed.Naked),
+		attribute.String("llm.reply.background", parsed.Background),
+		attribute.String("llm.reply.pose", parsed.Pose),
 	)
 	return parsed, payload.Usage, nil
 }

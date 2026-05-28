@@ -142,21 +142,69 @@ func TestSend_DetachesCallerContext(t *testing.T) {
 		"runTurn inherited caller's canceled context")
 }
 
-// TestComposeImagePrompt covers the three splice paths — clothing
-// when dressed, nudity when naked, emotion always — by asserting the
-// real comfyui constants land in the composed string.
+// TestComposeImagePrompt covers the splice paths: quality prefix and
+// character always present; pose-base + pose-addon; background; clothing
+// vs nudity; emotion always (no-op on neutral). The matrix lookups are
+// the load-bearing part — a missing pose/background slug must not crash,
+// and the splice fragments must land in the prompt verbatim.
 func TestComposeImagePrompt(t *testing.T) {
-	got := composeImagePrompt("happy", false)
+	got := composeImagePrompt("happy", "living_room", "standing", false)
+	assert.Contains(t, got, comfyui.ImageQualityPrefix)
 	assert.Contains(t, got, comfyui.ImagePrompt)
+	assert.Contains(t, got, comfyui.ImagePoseBases["standing"].Tags)
+	assert.Contains(t, got, comfyui.ImagePoseAddons["standing"]["living_room"])
+	assert.Contains(t, got, comfyui.ImageBackgrounds["living_room"].Tags)
 	assert.Contains(t, got, comfyui.ImageClothing)
 	assert.Contains(t, got, "warm smile")
 	assert.NotContains(t, got, comfyui.ImageNudity)
 
-	got = composeImagePrompt("happy", true)
+	got = composeImagePrompt("happy", "pub", "sitting", true)
+	assert.Contains(t, got, comfyui.ImagePoseBases["sitting"].Tags)
+	assert.Contains(t, got, comfyui.ImagePoseAddons["sitting"]["pub"])
+	assert.Contains(t, got, comfyui.ImageBackgrounds["pub"].Tags)
 	assert.Contains(t, got, comfyui.ImageNudity)
 	assert.NotContains(t, got, comfyui.ImageClothing)
 
-	got = composeImagePrompt("neutral", false)
-	// neutral emotion = empty fragment, prompt is base + clothing only.
-	assert.Equal(t, comfyui.ImagePrompt+", "+comfyui.ImageClothing, got)
+	// Neutral emotion contributes no expression tags, but every other
+	// splice still fires — verify by reconstructing the expected string
+	// in the documented order.
+	got = composeImagePrompt("neutral", "forest_park", "bent_over", false)
+	want := comfyui.ImageQualityPrefix +
+		", " + comfyui.ImagePrompt +
+		", " + comfyui.ImagePoseBases["bent_over"].Tags +
+		", " + comfyui.ImagePoseAddons["bent_over"]["forest_park"] +
+		", " + comfyui.ImageBackgrounds["forest_park"].Tags +
+		", " + comfyui.ImageClothing
+	assert.Equal(t, want, got)
+
+	// Unknown slugs no-op gracefully so older saved conversations (and
+	// any malformed reply that slips past the schema) still produce a
+	// renderable prompt rather than panicking on a nil-map lookup.
+	got = composeImagePrompt("neutral", "atlantis", "moonwalk", false)
+	assert.Contains(t, got, comfyui.ImageQualityPrefix)
+	assert.Contains(t, got, comfyui.ImagePrompt)
+	assert.Contains(t, got, comfyui.ImageClothing)
+	assert.NotContains(t, got, "scenery")
+}
+
+// TestComposeImagePrompt_TagOrder verifies the Booru-convention ordering
+// is preserved. Drift here means the renderer sees the subject after the
+// scene (weaker character lock) or the emotion before the clothing (which
+// can blend expression into the outfit). Asserts by index lookup so it
+// fails noisily rather than just flagging a missing tag.
+func TestComposeImagePrompt_TagOrder(t *testing.T) {
+	got := composeImagePrompt("amused", "mechanics_shop", "standing", false)
+	idx := func(needle string) int { return strings.Index(got, needle) }
+	require.NotEqual(t, -1, idx(comfyui.ImageQualityPrefix))
+	require.NotEqual(t, -1, idx(comfyui.ImagePrompt))
+	require.NotEqual(t, -1, idx(comfyui.ImagePoseBases["standing"].Tags))
+	require.NotEqual(t, -1, idx(comfyui.ImageBackgrounds["mechanics_shop"].Tags))
+	require.NotEqual(t, -1, idx(comfyui.ImageClothing))
+	require.NotEqual(t, -1, idx("amused expression"))
+
+	assert.Less(t, idx(comfyui.ImageQualityPrefix), idx(comfyui.ImagePrompt))
+	assert.Less(t, idx(comfyui.ImagePrompt), idx(comfyui.ImagePoseBases["standing"].Tags))
+	assert.Less(t, idx(comfyui.ImagePoseBases["standing"].Tags), idx(comfyui.ImageBackgrounds["mechanics_shop"].Tags))
+	assert.Less(t, idx(comfyui.ImageBackgrounds["mechanics_shop"].Tags), idx(comfyui.ImageClothing))
+	assert.Less(t, idx(comfyui.ImageClothing), idx("amused expression"))
 }

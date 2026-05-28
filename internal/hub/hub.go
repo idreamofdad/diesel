@@ -435,7 +435,15 @@ func (h *Hub) runTurn(ctx context.Context, s settings.AppSettings, user chat.Mes
 		return
 	}
 
-	assistant := chat.Message{Role: chat.RoleAssistant, Content: reply.Text, Emotion: reply.Emotion, Naked: reply.Naked, Timestamp: time.Now()}
+	assistant := chat.Message{
+		Role:       chat.RoleAssistant,
+		Content:    reply.Text,
+		Emotion:    reply.Emotion,
+		Naked:      reply.Naked,
+		Background: reply.Background,
+		Pose:       reply.Pose,
+		Timestamp:  time.Now(),
+	}
 	h.mu.Lock()
 	h.history = append(h.history, assistant)
 	// Clear inFlight as soon as text lands so the user can immediately
@@ -521,7 +529,7 @@ func (h *Hub) renderPortrait(ctx context.Context, s settings.AppSettings, reply 
 	if !s.EnableImageGen {
 		return
 	}
-	prompt := composeImagePrompt(reply.Emotion, reply.Naked)
+	prompt := composeImagePrompt(reply.Emotion, reply.Background, reply.Pose, reply.Naked)
 	// Stream sampler steps and intermediate preview frames as
 	// EventPortraitProgress so subscribers can paint the image as it
 	// develops. Preview bytes go into the previews cache and a
@@ -564,22 +572,41 @@ func (h *Hub) renderPortrait(ctx context.Context, s settings.AppSettings, reply 
 }
 
 // composeImagePrompt assembles the image prompt from comfyui's hardcoded
-// base, the clothing or nudity splice, and the chat-driven emotion
-// fragment. Lives in hub because it's the only place that knows both
-// halves of the recipe — comfyui owns the base/clothing/nudity strings,
-// chat owns the emotion lookup.
-func composeImagePrompt(emotion string, naked bool) string {
-	prompt := comfyui.ImagePrompt
-	switch {
-	case naked:
-		prompt = prompt + ", " + comfyui.ImageNudity
-	default:
-		prompt = prompt + ", " + comfyui.ImageClothing
+// fragments and the chat-driven scene/posture/expression slugs. Order is
+// Booru convention for Illustrious-family checkpoints:
+//
+//	quality → character → pose-base + pose-addon → background → clothing|nudity → emotion
+//
+// Subject identity goes early so the renderer locks onto the character,
+// pose drives the silhouette before the scene populates around it, and
+// expression lands last so it modulates an already-coherent face rather
+// than competing with structural tags. Empty/unknown slugs no-op
+// gracefully (chat.go guards against this on the inbound side, but the
+// belt-and-braces lookups make the composition tolerant of conversation
+// files written before the matrix existed).
+//
+// Lives in hub because it's the only place that knows the full recipe —
+// comfyui owns the fragment strings, chat owns the slug enums.
+func composeImagePrompt(emotion, background, pose string, naked bool) string {
+	parts := []string{comfyui.ImageQualityPrefix, comfyui.ImagePrompt}
+	if spec, ok := comfyui.ImagePoseBases[trimSpace(pose)]; ok {
+		parts = append(parts, spec.Tags)
+		if addon := comfyui.ImagePoseAddons[trimSpace(pose)][trimSpace(background)]; addon != "" {
+			parts = append(parts, addon)
+		}
+	}
+	if spec, ok := comfyui.ImageBackgrounds[trimSpace(background)]; ok {
+		parts = append(parts, spec.Tags)
+	}
+	if naked {
+		parts = append(parts, comfyui.ImageNudity)
+	} else {
+		parts = append(parts, comfyui.ImageClothing)
 	}
 	if frag := comfyui.EmotionPrompts[trimSpace(emotion)]; frag != "" {
-		prompt = prompt + ", " + frag
+		parts = append(parts, frag)
 	}
-	return prompt
+	return strings.Join(parts, ", ")
 }
 
 // setStatus updates the cached status string and broadcasts it.

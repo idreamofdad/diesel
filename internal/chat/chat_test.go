@@ -86,60 +86,80 @@ func TestCompletion_ConfigurationErrors(t *testing.T) {
 
 func TestCompletion_ResponseParsing(t *testing.T) {
 	cases := []struct {
-		name        string
-		body        string
-		status      int
-		wantText    string
-		wantEmotion string
-		wantNaked   bool
-		wantErrSub  string
+		name           string
+		body           string
+		status         int
+		wantText       string
+		wantEmotion    string
+		wantNaked      bool
+		wantBackground string
+		wantPose       string
+		wantErrSub     string
 	}{
 		{
-			name:        "structured JSON reply",
-			body:        jsonChoice(`{"text":"hello there","emotion":"amused","naked":false}`, Usage{}),
-			status:      200,
-			wantText:    "hello there",
-			wantEmotion: "amused",
+			name:           "structured JSON reply",
+			body:           jsonChoice(`{"text":"hello there","emotion":"amused","naked":false,"background":"living_room","pose":"sitting"}`, Usage{}),
+			status:         200,
+			wantText:       "hello there",
+			wantEmotion:    "amused",
+			wantBackground: "living_room",
+			wantPose:       "sitting",
 		},
 		{
-			name:        "naked flag round-trips",
-			body:        jsonChoice(`{"text":"come closer","emotion":"horny","naked":true}`, Usage{}),
-			status:      200,
-			wantText:    "come closer",
-			wantEmotion: "horny",
-			wantNaked:   true,
+			name:           "naked flag round-trips",
+			body:           jsonChoice(`{"text":"come closer","emotion":"horny","naked":true,"background":"pub","pose":"standing"}`, Usage{}),
+			status:         200,
+			wantText:       "come closer",
+			wantEmotion:    "horny",
+			wantNaked:      true,
+			wantBackground: "pub",
+			wantPose:       "standing",
 		},
 		{
-			name:        "plain text fallback when JSON parse fails",
-			body:        jsonChoice(`just some prose, no JSON`, Usage{}),
-			status:      200,
-			wantText:    "just some prose, no JSON",
-			wantEmotion: "neutral",
+			// On the fallback path with no history, both scene and pose
+			// fall through to the hardcoded defaults so the portrait
+			// pipeline still has valid slugs to look up.
+			name:           "plain text fallback when JSON parse fails",
+			body:           jsonChoice(`just some prose, no JSON`, Usage{}),
+			status:         200,
+			wantText:       "just some prose, no JSON",
+			wantEmotion:    "neutral",
+			wantBackground: comfyui.DefaultImageBackground,
+			wantPose:       comfyui.DefaultImagePose,
 		},
 		{
 			// A valid structured reply with empty text must NOT be
 			// mistaken for a parse failure — otherwise the raw JSON blob
 			// leaks into the transcript.
-			name:        "empty text in a valid structured reply",
-			body:        jsonChoice(`{"text":"","emotion":"amused","naked":true}`, Usage{}),
-			status:      200,
-			wantText:    "",
-			wantEmotion: "amused",
-			wantNaked:   true,
+			name:           "empty text in a valid structured reply",
+			body:           jsonChoice(`{"text":"","emotion":"amused","naked":true,"background":"forest_park","pose":"bent_over"}`, Usage{}),
+			status:         200,
+			wantText:       "",
+			wantEmotion:    "amused",
+			wantNaked:      true,
+			wantBackground: "forest_park",
+			wantPose:       "bent_over",
 		},
 		{
-			name:        "missing emotion defaults to neutral",
-			body:        jsonChoice(`{"text":"ok"}`, Usage{}),
-			status:      200,
-			wantText:    "ok",
-			wantEmotion: "neutral",
+			// A provider that ignores parts of the schema may omit the
+			// new fields; we still want a usable reply, so they fall
+			// through to the defaults rather than landing as "".
+			name:           "missing emotion defaults to neutral",
+			body:           jsonChoice(`{"text":"ok"}`, Usage{}),
+			status:         200,
+			wantText:       "ok",
+			wantEmotion:    "neutral",
+			wantBackground: comfyui.DefaultImageBackground,
+			wantPose:       comfyui.DefaultImagePose,
 		},
 		{
-			name:        "think block stripped from content",
-			body:        jsonChoice("<think>internal reasoning</think>\n"+`{"text":"final","emotion":"happy","naked":false}`, Usage{}),
-			status:      200,
-			wantText:    "final",
-			wantEmotion: "happy",
+			name:           "think block stripped from content",
+			body:           jsonChoice("<think>internal reasoning</think>\n"+`{"text":"final","emotion":"happy","naked":false,"background":"mechanics_shop","pose":"standing"}`, Usage{}),
+			status:         200,
+			wantText:       "final",
+			wantEmotion:    "happy",
+			wantBackground: "mechanics_shop",
+			wantPose:       "standing",
 		},
 		{
 			name:       "server returns 500",
@@ -170,8 +190,30 @@ func TestCompletion_ResponseParsing(t *testing.T) {
 			assert.Equal(t, tc.wantText, reply.Text)
 			assert.Equal(t, tc.wantEmotion, reply.Emotion)
 			assert.Equal(t, tc.wantNaked, reply.Naked)
+			assert.Equal(t, tc.wantBackground, reply.Background)
+			assert.Equal(t, tc.wantPose, reply.Pose)
 		})
 	}
+}
+
+// TestCompletion_FallbackInheritsScene covers the history-aware part of
+// the fallback path: when a prior assistant turn exists, plain-text
+// replies inherit its scene/posture rather than teleporting Diesel back
+// to the hardcoded defaults.
+func TestCompletion_FallbackInheritsScene(t *testing.T) {
+	srv, _ := stubChatServer(t, 200, jsonChoice(`just prose`, Usage{}))
+	reply, _, err := Completion(context.Background(),
+		settings.AppSettings{APIEndpoint: srv.URL, Model: "m", HistoryMessages: 99},
+		[]Message{
+			{Role: RoleUser, Content: "u1"},
+			{Role: RoleAssistant, Content: "a1", Background: "pub", Pose: "sitting"},
+			{Role: RoleUser, Content: "u2"},
+		},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, "just prose", reply.Text)
+	assert.Equal(t, "pub", reply.Background)
+	assert.Equal(t, "sitting", reply.Pose)
 }
 
 func TestCompletion_UsageBlock(t *testing.T) {
@@ -436,6 +478,83 @@ func TestCompletion_LastEmotionSystemMessage(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("prior assistant background is fed back as a system message", func(t *testing.T) {
+		srv, req := stubChatServer(t, 200, jsonChoice(`{"text":"ok","emotion":"neutral"}`, Usage{}))
+		_, _, err := Completion(context.Background(),
+			settings.AppSettings{APIEndpoint: srv.URL, Model: "m", HistoryMessages: 99},
+			[]Message{
+				{Role: RoleUser, Content: "u1"},
+				{Role: RoleAssistant, Content: "a1", Background: "pub"},
+				{Role: RoleUser, Content: "u2"},
+			},
+		)
+		require.NoError(t, err)
+		var found bool
+		for _, m := range req.Messages {
+			if m.Role == RoleSystem && strings.Contains(m.Content, "last shown in") {
+				found = true
+				// Verify the human-readable label is what gets sent,
+				// not the slug — "pub" matches "the pub", not just "pub"
+				// vs "mechanics_shop".
+				assert.Contains(t, m.Content, comfyui.ImageBackgrounds["pub"].Label)
+			}
+		}
+		assert.True(t, found, "expected a system message naming the last background")
+	})
+
+	t.Run("prior assistant pose is fed back as a system message", func(t *testing.T) {
+		srv, req := stubChatServer(t, 200, jsonChoice(`{"text":"ok","emotion":"neutral"}`, Usage{}))
+		_, _, err := Completion(context.Background(),
+			settings.AppSettings{APIEndpoint: srv.URL, Model: "m", HistoryMessages: 99},
+			[]Message{
+				{Role: RoleUser, Content: "u1"},
+				{Role: RoleAssistant, Content: "a1", Pose: "bent_over"},
+				{Role: RoleUser, Content: "u2"},
+			},
+		)
+		require.NoError(t, err)
+		var found bool
+		for _, m := range req.Messages {
+			if m.Role == RoleSystem && strings.Contains(m.Content, "last pose") {
+				found = true
+				assert.Contains(t, m.Content, comfyui.ImagePoseBases["bent_over"].Label)
+			}
+		}
+		assert.True(t, found, "expected a system message naming the last pose")
+	})
+
+	t.Run("no assistant turn yet means no background/pose system messages", func(t *testing.T) {
+		srv, req := stubChatServer(t, 200, jsonChoice(`{"text":"ok","emotion":"neutral"}`, Usage{}))
+		_, _, err := Completion(context.Background(),
+			settings.AppSettings{APIEndpoint: srv.URL, Model: "m"},
+			[]Message{{Role: RoleUser, Content: "hi"}},
+		)
+		require.NoError(t, err)
+		for _, m := range req.Messages {
+			assert.NotContains(t, m.Content, "last shown in")
+			assert.NotContains(t, m.Content, "last pose")
+		}
+	})
+
+	t.Run("background and pose are stripped from the assistant turn on the wire", func(t *testing.T) {
+		srv, req := stubChatServer(t, 200, jsonChoice(`{"text":"ok","emotion":"neutral"}`, Usage{}))
+		_, _, err := Completion(context.Background(),
+			settings.AppSettings{APIEndpoint: srv.URL, Model: "m", HistoryMessages: 99},
+			[]Message{
+				{Role: RoleUser, Content: "u1"},
+				{Role: RoleAssistant, Content: "a1", Background: "pub", Pose: "sitting"},
+				{Role: RoleUser, Content: "u2"},
+			},
+		)
+		require.NoError(t, err)
+		for _, m := range req.Messages {
+			if m.Role == RoleAssistant {
+				assert.Empty(t, m.Background, "background must not ride on the wire assistant turn")
+				assert.Empty(t, m.Pose, "pose must not ride on the wire assistant turn")
+			}
+		}
+	})
 }
 
 func TestCompletion_AuthHeader(t *testing.T) {
@@ -524,9 +643,55 @@ func TestCompletion_RequestBodyShape(t *testing.T) {
 		assert.True(t, ok, "comfyui.EmotionPrompts is missing an entry for %q", e)
 	}
 
-	// The naked flag must be present in properties AND required — with
-	// strict mode + additionalProperties:false, OpenAI structured outputs
-	// reject the schema unless every property is listed as required.
+	// Background enum mirrors the comfyui scene table; a missing match
+	// means the portrait pipeline can't look up the scene's tag block.
+	backgroundProp, ok := props["background"].(map[string]any)
+	require.True(t, ok, "background property missing from schema")
+	bgEnumRaw, ok := backgroundProp["enum"].([]any)
+	require.True(t, ok)
+	gotBgEnum := make([]string, len(bgEnumRaw))
+	for i, v := range bgEnumRaw {
+		gotBgEnum[i] = v.(string)
+	}
+	assert.Equal(t, Backgrounds, gotBgEnum)
+	for _, bg := range Backgrounds {
+		_, ok := comfyui.ImageBackgrounds[bg]
+		assert.True(t, ok, "comfyui.ImageBackgrounds is missing an entry for %q", bg)
+	}
+
+	// Pose enum mirrors the comfyui pose-base table; same rationale.
+	poseProp, ok := props["pose"].(map[string]any)
+	require.True(t, ok, "pose property missing from schema")
+	poseEnumRaw, ok := poseProp["enum"].([]any)
+	require.True(t, ok)
+	gotPoseEnum := make([]string, len(poseEnumRaw))
+	for i, v := range poseEnumRaw {
+		gotPoseEnum[i] = v.(string)
+	}
+	assert.Equal(t, Poses, gotPoseEnum)
+	for _, p := range Poses {
+		_, ok := comfyui.ImagePoseBases[p]
+		assert.True(t, ok, "comfyui.ImagePoseBases is missing an entry for %q", p)
+	}
+
+	// Matrix completeness: every (pose, background) pair must have a
+	// populated addon. A missing cell would render without scene-prop
+	// interaction (a wrench in mechanics_shop, a cup in the pub), which
+	// silently degrades the portrait rather than failing loudly.
+	for _, p := range Poses {
+		addons, ok := comfyui.ImagePoseAddons[p]
+		require.True(t, ok, "comfyui.ImagePoseAddons is missing the %q row", p)
+		for _, bg := range Backgrounds {
+			a, ok := addons[bg]
+			assert.True(t, ok, "comfyui.ImagePoseAddons[%q] is missing the %q cell", p, bg)
+			assert.NotEmpty(t, a, "comfyui.ImagePoseAddons[%q][%q] is empty", p, bg)
+		}
+	}
+
+	// Naked, background, and pose must be present in properties AND
+	// required — with strict mode + additionalProperties:false, OpenAI
+	// structured outputs reject the schema unless every property is
+	// listed as required.
 	nakedProp, ok := props["naked"].(map[string]any)
 	require.True(t, ok, "naked property missing from schema")
 	assert.Equal(t, "boolean", nakedProp["type"])
@@ -536,7 +701,7 @@ func TestCompletion_RequestBodyShape(t *testing.T) {
 	for i, v := range requiredRaw {
 		gotRequired[i] = v.(string)
 	}
-	assert.ElementsMatch(t, []string{"text", "emotion", "naked"}, gotRequired)
+	assert.ElementsMatch(t, []string{"text", "emotion", "naked", "background", "pose"}, gotRequired)
 
 	// Reasoning-disable: every provider variant should be set.
 	assert.Equal(t, "none", body["reasoning_effort"])
