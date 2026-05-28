@@ -11,21 +11,21 @@ package comfyui
 // hub splices ImageClothing or ImageNudity onto the end of this before
 // handing it to Generate, then appends an emotion fragment from
 // EmotionPrompts.
-const ImagePrompt = `solo, dubusi, ochman, fat man, hairy, braided beard, short green hair, green eyes, living room`
+const ImagePrompt = `solo, dubusi, ochman, fat man, hairy, braided beard, mustache, short green hair, green eyes, plain black background`
 
 // ImageClothing is appended to ImagePrompt when the structured reply's
 // Naked flag is false. Kept separate so the splice can swap it for
 // ImageNudity — a hard-coded outfit in the base prompt would fight the
 // nudity splice and confuse the renderer.
-const ImageClothing = `blue t-shirt, blue jeans,`
+const ImageClothing = `blue t-shirt, blue jeans`
 
 // ImageNudity is appended to ImagePrompt in place of ImageClothing when
 // the reply's Naked flag is true.
-const ImageNudity = `naked, small penis, flaccid, uncut, uncircumcised, foreskin, green pubic hair, green chest hair, small nipples,`
+const ImageNudity = `naked, small penis, flaccid, uncut, uncircumcised, foreskin, green pubic hair, green chest hair, small nipples, small testicles`
 
 // ImageNegativePrompt steers the renderer away from the usual diffusion
 // failure modes. Read directly by Generate.
-const ImageNegativePrompt = `woman, girl, shirt logo, feminine, wide hips,`
+const ImageNegativePrompt = `woman, girl, shirt logo, feminine, wide hips`
 
 // EmotionPrompts maps each chat-reply emotion to the prompt fragment
 // spliced onto the end of the image prompt to steer the portrait's
