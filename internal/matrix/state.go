@@ -3,11 +3,8 @@ package matrix
 import (
 	"context"
 	"crypto/rand"
-	"encoding/json"
 
 	"diesel/internal/storage"
-
-	"maunium.net/go/mautrix/id"
 )
 
 // kv keys used by the bridge. Each row is one JSON blob, stored apart
@@ -23,10 +20,6 @@ const (
 	// homeserverKey caches the .well-known-discovered homeserver URL
 	// so subsequent restarts don't re-fetch the discovery JSON.
 	homeserverKey = "matrix_homeserver"
-	// portraitsKey holds the per-room event ID of the last portrait we
-	// posted, so the next portrait can redact the previous one — the
-	// Matrix analogue of telegram_portraits.
-	portraitsKey = "matrix_portraits"
 )
 
 // pickleKeyBytes is the mautrix-recommended pickle-key length. Fixed so
@@ -79,29 +72,4 @@ func loadHomeserverURL(ctx context.Context, store *storage.Store) string {
 // saveHomeserverURL persists the discovered homeserver URL.
 func saveHomeserverURL(ctx context.Context, store *storage.Store, url string) error {
 	return store.KVSet(ctx, homeserverKey, []byte(url))
-}
-
-// loadPortraitState reads the per-room → portrait-event-ID map. A
-// missing or corrupt record yields an empty (non-nil) map — same
-// contract as telegram.loadPortraitState. JSON encodes both keys and
-// values as strings, so the round-trip is lossless.
-func loadPortraitState(ctx context.Context, store *storage.Store) map[id.RoomID]id.EventID {
-	raw, ok, err := store.KVGet(ctx, portraitsKey)
-	if err != nil || !ok {
-		return map[id.RoomID]id.EventID{}
-	}
-	var m map[id.RoomID]id.EventID
-	if json.Unmarshal(raw, &m) != nil || m == nil {
-		return map[id.RoomID]id.EventID{}
-	}
-	return m
-}
-
-// savePortraitState writes the per-room → portrait-event-ID map.
-func savePortraitState(ctx context.Context, store *storage.Store, m map[id.RoomID]id.EventID) error {
-	data, err := json.Marshal(m)
-	if err != nil {
-		return err
-	}
-	return store.KVSet(ctx, portraitsKey, data)
 }

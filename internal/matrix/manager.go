@@ -37,7 +37,6 @@ import (
 	"go.mau.fi/util/dbutil"
 
 	"maunium.net/go/mautrix"
-	"maunium.net/go/mautrix/crypto/attachment"
 	"maunium.net/go/mautrix/crypto/cryptohelper"
 	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/id"
@@ -104,13 +103,6 @@ type pending struct {
 	roomID  id.RoomID
 	eventID id.EventID
 	text    string
-}
-
-// turnRef remembers which room a Matrix-originated turn belonged to,
-// so the portrait that turn produces later can be sent into the same
-// room. Keyed by hub turn ID.
-type turnRef struct {
-	roomID id.RoomID
 }
 
 // configFor extracts the Matrix-relevant fields and normalizes the
@@ -619,11 +611,9 @@ func (m *Manager) dispatchLoop(ctx context.Context, sub *hub.Subscriber, client 
 	// inFlight is whichever pending we most recently handed to the
 	// hub. The hub processes one turn at a time, so we only ever have
 	// one outstanding; this lets EventTurnComplete know which inbound
-	// message ID to use as the m.in_reply_to anchor on the reply.
+	// message ID to mark as read once the reply lands.
 	var inFlight *pending
 	var typingCancel context.CancelFunc
-	awaitingPortrait := map[int64]turnRef{}
-	lastPortrait := loadPortraitState(ctx, m.store)
 
 	stopTyping := func() {
 		if typingCancel != nil {
@@ -637,7 +627,10 @@ func (m *Manager) dispatchLoop(ctx context.Context, sub *hub.Subscriber, client 
 		for len(queue) > 0 {
 			p := queue[0]
 			origin := originPrefix + string(p.roomID)
-			err := m.hub.Send(ctx, p.text, origin, true)
+			// landscape=false: the hub still renders a portrait for
+			// the desktop/web clients, but Matrix doesn't ship images
+			// (yet), so the wide-format hint isn't useful here.
+			err := m.hub.Send(ctx, p.text, origin, false)
 			if err == nil {
 				inFlight = &p
 				queue = queue[1:]
@@ -687,8 +680,7 @@ func (m *Manager) dispatchLoop(ctx context.Context, sub *hub.Subscriber, client 
 					stopTyping()
 					// Capture the user's incoming event ID before
 					// clearing inFlight — used only for the read
-					// receipt, not to anchor the reply (which is a
-					// plain standalone message, not a quote).
+					// receipt.
 					var readUpTo id.EventID
 					if inFlight != nil && inFlight.roomID == roomID {
 						readUpTo = inFlight.eventID
@@ -705,27 +697,12 @@ func (m *Manager) dispatchLoop(ctx context.Context, sub *hub.Subscriber, client 
 							}
 						}
 					}
-					awaitingPortrait[ev.TurnID] = turnRef{roomID: roomID}
 				}
 				drain()
-			case hub.EventPortraitReady:
-				ref, ok := awaitingPortrait[ev.TurnID]
-				if !ok {
-					break
-				}
-				delete(awaitingPortrait, ev.TurnID)
-				if ev.PortraitURL != "" {
-					newID, sent := m.sendPortrait(ctx, client, ref, ev.PortraitURL)
-					if !sent {
-						break
-					}
-					m.redactPortrait(ctx, client, lastPortrait, ref.roomID)
-					lastPortrait[ref.roomID] = newID
-					m.persistPortraits(ctx, lastPortrait)
-					break
-				}
-				m.redactPortrait(ctx, client, lastPortrait, ref.roomID)
-				m.persistPortraits(ctx, lastPortrait)
+				// Portraits aren't shipped over Matrix for now —
+				// EventPortraitReady is intentionally ignored. Other
+				// subscribers (desktop/web) still receive and render
+				// the image normally.
 			case hub.EventTurnError:
 				if mine {
 					stopTyping()
@@ -792,89 +769,6 @@ func (m *Manager) sendReply(ctx context.Context, client *mautrix.Client, roomID 
 		return ""
 	}
 	return resp.EventID
-}
-
-// sendPortrait uploads the rendered portrait for a turn and posts it
-// as a standalone m.image in the room — no m.in_reply_to relation, so
-// it sits in the timeline as a regular image post rather than a
-// quoted reply. In an encrypted room the file bytes are wrapped with
-// a per-file key (m.file media encryption) and the surrounding event
-// is encrypted with the room's Megolm session by mautrix.
-func (m *Manager) sendPortrait(ctx context.Context, client *mautrix.Client, ref turnRef, portraitURL string) (id.EventID, bool) {
-	portraitID := strings.TrimPrefix(portraitURL, "/api/v1/portrait/")
-	data, ok := m.hub.Portrait(portraitID)
-	if !ok || len(data) == 0 {
-		log.Printf("[matrix] portrait %q not in hub cache", portraitID)
-		return "", false
-	}
-
-	encrypted := false
-	if client.StateStore != nil {
-		isEnc, err := client.StateStore.IsEncrypted(ctx, ref.roomID)
-		if err == nil {
-			encrypted = isEnc
-		}
-	}
-
-	content := event.MessageEventContent{
-		MsgType: event.MsgImage,
-		Body:    "portrait.png",
-		Info:    &event.FileInfo{MimeType: "image/png", Size: len(data)},
-	}
-
-	if encrypted {
-		ef := attachment.NewEncryptedFile()
-		ciphertext := ef.Encrypt(data)
-		upload, err := client.UploadBytes(ctx, ciphertext, "application/octet-stream")
-		if err != nil {
-			log.Printf("[matrix] upload portrait to %s: %v", ref.roomID, err)
-			m.setStatus("✗ Matrix portrait: " + err.Error())
-			return "", false
-		}
-		content.File = &event.EncryptedFileInfo{
-			EncryptedFile: *ef,
-			URL:           upload.ContentURI.CUString(),
-		}
-	} else {
-		upload, err := client.UploadBytes(ctx, data, "image/png")
-		if err != nil {
-			log.Printf("[matrix] upload portrait to %s: %v", ref.roomID, err)
-			m.setStatus("✗ Matrix portrait: " + err.Error())
-			return "", false
-		}
-		content.URL = upload.ContentURI.CUString()
-	}
-
-	resp, err := client.SendMessageEvent(ctx, ref.roomID, event.EventMessage, content)
-	if err != nil {
-		log.Printf("[matrix] send portrait to %s: %v", ref.roomID, err)
-		m.setStatus("✗ Matrix portrait: " + err.Error())
-		return "", false
-	}
-	return resp.EventID, true
-}
-
-// redactPortrait removes the previous portrait from a room, if any.
-// Matrix's analogue of Telegram's "deleteMessage": a server-side
-// tombstone. Best-effort — a redact failure (perms, gone) is logged.
-func (m *Manager) redactPortrait(ctx context.Context, client *mautrix.Client, lastPortrait map[id.RoomID]id.EventID, roomID id.RoomID) {
-	prev, ok := lastPortrait[roomID]
-	if !ok {
-		return
-	}
-	delete(lastPortrait, roomID)
-	if _, err := client.RedactEvent(ctx, roomID, prev); err != nil {
-		log.Printf("[matrix] redact portrait %s in %s: %v", prev, roomID, err)
-	}
-}
-
-// persistPortraits writes the room → portrait-event-ID map. Best-effort:
-// a failed write means a restart might leak one stale portrait when its
-// replacement lands.
-func (m *Manager) persistPortraits(ctx context.Context, lastPortrait map[id.RoomID]id.EventID) {
-	if err := savePortraitState(ctx, m.store, lastPortrait); err != nil {
-		log.Printf("[matrix] save portraits: %v", err)
-	}
 }
 
 // parseOrigin extracts the room ID from a hub Origin string. The bool

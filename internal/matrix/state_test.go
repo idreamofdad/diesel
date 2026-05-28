@@ -9,8 +9,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"maunium.net/go/mautrix/id"
 )
 
 // newTestStore opens a throwaway SQLite database in a temp dir, closed
@@ -67,41 +65,4 @@ func TestHomeserverURL_Roundtrip(t *testing.T) {
 
 	require.NoError(t, saveHomeserverURL(ctx, store, "https://matrix-client.matrix.org"))
 	assert.Equal(t, "https://matrix-client.matrix.org", loadHomeserverURL(ctx, store))
-}
-
-// TestPortraitState_Roundtrip — save → load restores the room →
-// portrait-event-ID map. JSON encodes both keys and values as strings;
-// the round-trip preserves them losslessly so a restart can still
-// redact stale portraits.
-func TestPortraitState_Roundtrip(t *testing.T) {
-	store := newTestStore(t)
-	ctx := context.Background()
-
-	in := map[id.RoomID]id.EventID{
-		"!abc:matrix.org": "$evt1:matrix.org",
-		"!xyz:example":    "$evt2:example",
-	}
-	require.NoError(t, savePortraitState(ctx, store, in))
-
-	assert.Equal(t, in, loadPortraitState(ctx, store))
-}
-
-// TestPortraitState_Missing — a fresh install has no record; load
-// yields an empty, non-nil map the dispatch loop can index freely.
-func TestPortraitState_Missing(t *testing.T) {
-	out := loadPortraitState(context.Background(), newTestStore(t))
-	assert.NotNil(t, out)
-	assert.Empty(t, out)
-}
-
-// TestPortraitState_CorruptValue — a malformed stored value must not
-// crash the loader; it falls back to an empty map.
-func TestPortraitState_CorruptValue(t *testing.T) {
-	store := newTestStore(t)
-	ctx := context.Background()
-	require.NoError(t, store.KVSet(ctx, portraitsKey, []byte("{not json")))
-
-	out := loadPortraitState(ctx, store)
-	assert.NotNil(t, out)
-	assert.Empty(t, out)
 }
