@@ -106,12 +106,11 @@ type pending struct {
 	text    string
 }
 
-// turnRef remembers where a Matrix-originated turn's reply landed so
-// the portrait that turn produces later can be sent as a reply to the
-// right text message. Keyed by hub turn ID.
+// turnRef remembers which room a Matrix-originated turn belonged to,
+// so the portrait that turn produces later can be sent into the same
+// room. Keyed by hub turn ID.
 type turnRef struct {
-	roomID       id.RoomID
-	replyEventID id.EventID
+	roomID id.RoomID
 }
 
 // configFor extracts the Matrix-relevant fields and normalizes the
@@ -686,24 +685,27 @@ func (m *Manager) dispatchLoop(ctx context.Context, sub *hub.Subscriber, client 
 			case hub.EventTurnComplete:
 				if mine {
 					stopTyping()
-					var replyTo id.EventID
+					// Capture the user's incoming event ID before
+					// clearing inFlight — used only for the read
+					// receipt, not to anchor the reply (which is a
+					// plain standalone message, not a quote).
+					var readUpTo id.EventID
 					if inFlight != nil && inFlight.roomID == roomID {
-						replyTo = inFlight.eventID
+						readUpTo = inFlight.eventID
 					}
 					inFlight = nil
-					var replyID id.EventID
 					if ev.Assistant != nil {
-						replyID = m.sendReply(ctx, client, roomID, ev.Assistant.Content, replyTo)
-						if replyTo != "" && replyID != "" {
+						replyID := m.sendReply(ctx, client, roomID, ev.Assistant.Content)
+						if readUpTo != "" && replyID != "" {
 							// Mark the user's message as read once the
 							// reply lands so Diesel shows the same
 							// "seen" affordance Element gives a human.
-							if err := client.MarkRead(ctx, roomID, replyTo); err != nil {
+							if err := client.MarkRead(ctx, roomID, readUpTo); err != nil {
 								log.Printf("[matrix] mark read in %s: %v", roomID, err)
 							}
 						}
 					}
-					awaitingPortrait[ev.TurnID] = turnRef{roomID: roomID, replyEventID: replyID}
+					awaitingPortrait[ev.TurnID] = turnRef{roomID: roomID}
 				}
 				drain()
 			case hub.EventPortraitReady:
@@ -767,11 +769,13 @@ func (m *Manager) typingLoop(ctx context.Context, client *mautrix.Client, roomID
 	}
 }
 
-// sendReply posts the assistant's reply into roomID. Encryption is
-// automatic when the room is encrypted — mautrix's SendMessageEvent
+// sendReply posts the assistant's reply into roomID as a plain
+// standalone message — no m.in_reply_to relation, so Element et al.
+// render it as a normal post instead of a quoted reply. Encryption is
+// automatic when the room is encrypted: mautrix's SendMessageEvent
 // checks StateStore.IsEncrypted and encrypts via the configured
-// CryptoHelper. The returned event ID anchors a later portrait reply.
-func (m *Manager) sendReply(ctx context.Context, client *mautrix.Client, roomID id.RoomID, text string, replyTo id.EventID) id.EventID {
+// CryptoHelper.
+func (m *Manager) sendReply(ctx context.Context, client *mautrix.Client, roomID id.RoomID, text string) id.EventID {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return ""
@@ -779,9 +783,6 @@ func (m *Manager) sendReply(ctx context.Context, client *mautrix.Client, roomID 
 	content := event.MessageEventContent{
 		MsgType: event.MsgText,
 		Body:    text,
-	}
-	if replyTo != "" {
-		content.RelatesTo = (&event.RelatesTo{}).SetReplyTo(replyTo)
 	}
 	resp, err := client.SendMessageEvent(ctx, roomID, event.EventMessage, content)
 	if err != nil {
@@ -794,10 +795,11 @@ func (m *Manager) sendReply(ctx context.Context, client *mautrix.Client, roomID 
 }
 
 // sendPortrait uploads the rendered portrait for a turn and posts it
-// as an m.image, anchored as an m.in_reply_to of that turn's text
-// reply. In an encrypted room the file bytes are wrapped with a
-// per-file key (m.file media encryption) and the surrounding event is
-// encrypted with the room's Megolm session by mautrix.
+// as a standalone m.image in the room — no m.in_reply_to relation, so
+// it sits in the timeline as a regular image post rather than a
+// quoted reply. In an encrypted room the file bytes are wrapped with
+// a per-file key (m.file media encryption) and the surrounding event
+// is encrypted with the room's Megolm session by mautrix.
 func (m *Manager) sendPortrait(ctx context.Context, client *mautrix.Client, ref turnRef, portraitURL string) (id.EventID, bool) {
 	portraitID := strings.TrimPrefix(portraitURL, "/api/v1/portrait/")
 	data, ok := m.hub.Portrait(portraitID)
@@ -818,9 +820,6 @@ func (m *Manager) sendPortrait(ctx context.Context, client *mautrix.Client, ref 
 		MsgType: event.MsgImage,
 		Body:    "portrait.png",
 		Info:    &event.FileInfo{MimeType: "image/png", Size: len(data)},
-	}
-	if ref.replyEventID != "" {
-		content.RelatesTo = (&event.RelatesTo{}).SetReplyTo(ref.replyEventID)
 	}
 
 	if encrypted {
