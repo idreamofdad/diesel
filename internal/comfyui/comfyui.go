@@ -58,7 +58,29 @@ const ImageNudity = `naked, small penis, flaccid, uncut, uncircumcised, foreskin
 
 // ImageNegativePrompt steers the renderer away from the usual diffusion
 // failure modes. Read directly by Generate.
-const ImageNegativePrompt = `woman, girl, shirt logo, feminine, wide hips`
+const ImageNegativePrompt = `woman, girl, shirt logo, feminine, wide hips,`
+
+// EmotionPrompts maps each chat-reply emotion to the prompt fragment
+// spliced onto the end of the image prompt to steer the portrait's
+// expression. Values are tuned as SD-style comma-separated tag lists
+// rather than bare adjectives so the renderer has concrete features to
+// latch onto (mouth shape, eye state, brow position). An empty value
+// (neutral) skips the splice and renders the base prompt unchanged.
+// Keys must match chat.Emotions one-for-one; chat_test.go guards that.
+var EmotionPrompts = map[string]string{
+	"happy":             "warm smile, bright eyes, cheerful expression",
+	"sad":               "downturned mouth, sorrowful eyes, slight tear, melancholy expression",
+	"angry":             "furrowed brow, scowl, gritted teeth, angry expression",
+	"surprised happy":   "wide delighted eyes, open smiling mouth, raised eyebrows, pleasantly surprised expression",
+	"surprised shocked": "wide shocked eyes, mouth agape, raised eyebrows, alarmed expression",
+	"laughing":          "head tilted back, mouth wide open laughing, squinted eyes, joyful laughter",
+	"neutral":           "",
+	"amused":            "subtle smirk, raised eyebrow, glint in the eyes, amused expression",
+	"annoyed":           "narrowed eyes, slight frown, pursed lips, annoyed expression",
+	"thoughtful":        "hand on chin, distant gaze, slightly furrowed brow, contemplative expression",
+	"flirtatious":       "half-lidded eyes, playful smirk, raised eyebrow, flirtatious expression",
+	"horny":             "flushed cheeks, half-lidded eyes, parted lips, biting lower lip, aroused expression, smirk",
+}
 
 // workflowNode is one entry of a ComfyUI API-format graph. Inputs is left
 // as a free-form map because node schemas vary wildly and we only ever

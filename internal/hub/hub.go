@@ -576,7 +576,7 @@ func composeImagePrompt(emotion string, naked bool) string {
 	default:
 		prompt = prompt + ", " + comfyui.ImageClothing
 	}
-	if frag := chat.EmotionPrompts[trimSpace(emotion)]; frag != "" {
+	if frag := comfyui.EmotionPrompts[trimSpace(emotion)]; frag != "" {
 		prompt = prompt + ", " + frag
 	}
 	return prompt

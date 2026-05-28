@@ -111,32 +111,11 @@ type Reply struct {
 }
 
 // Emotions is the closed set the model is constrained to choose from.
-// Each entry must have a matching key in EmotionPrompts so the portrait
-// pipeline knows how to render it.
+// Each entry must have a matching key in comfyui.EmotionPrompts so the
+// portrait pipeline knows how to render it.
 var Emotions = []string{
 	"happy", "sad", "angry", "surprised happy", "surprised shocked", "laughing",
 	"neutral", "amused", "annoyed", "thoughtful", "flirtatious", "horny",
-}
-
-// EmotionPrompts maps each emotion to the prompt fragment spliced into the
-// image prompt to steer the portrait's expression. Values are tuned as
-// SD-style comma-separated tag lists rather than bare adjectives so the
-// renderer has concrete features to latch onto (mouth shape, eye state,
-// brow position). An empty value (neutral) skips the splice and renders
-// the base prompt unchanged.
-var EmotionPrompts = map[string]string{
-	"happy":             "warm smile, bright eyes, cheerful expression",
-	"sad":               "downturned mouth, sorrowful eyes, slight tear, melancholy expression",
-	"angry":             "furrowed brow, scowl, gritted teeth, angry expression",
-	"surprised happy":   "wide delighted eyes, open smiling mouth, raised eyebrows, pleasantly surprised expression",
-	"surprised shocked": "wide shocked eyes, mouth agape, raised eyebrows, alarmed expression",
-	"laughing":          "head tilted back, mouth wide open laughing, squinted eyes, joyful laughter",
-	"neutral":           "",
-	"amused":            "subtle smirk, raised eyebrow, glint in the eyes, amused expression",
-	"annoyed":           "narrowed eyes, slight frown, pursed lips, annoyed expression",
-	"thoughtful":        "hand on chin, distant gaze, slightly furrowed brow, contemplative expression",
-	"flirtatious":       "half-lidded eyes, playful smirk, raised eyebrow, flirtatious expression",
-	"horny":             "flushed cheeks, half-lidded eyes, parted lips, biting lower lip, aroused expression, smirk",
 }
 
 // lastEmotion returns the Emotion of the most recent assistant message

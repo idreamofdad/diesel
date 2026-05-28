@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"diesel/internal/comfyui"
 	"diesel/internal/settings"
 
 	"github.com/stretchr/testify/assert"
@@ -519,8 +520,8 @@ func TestCompletion_RequestBodyShape(t *testing.T) {
 	// fragment, otherwise the portrait pipeline silently renders without
 	// expression steering when the model picks that emotion.
 	for _, e := range Emotions {
-		_, ok := EmotionPrompts[e]
-		assert.True(t, ok, "EmotionPrompts is missing an entry for %q", e)
+		_, ok := comfyui.EmotionPrompts[e]
+		assert.True(t, ok, "comfyui.EmotionPrompts is missing an entry for %q", e)
 	}
 
 	// The naked flag must be present in properties AND required — with
