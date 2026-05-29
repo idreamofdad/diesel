@@ -265,43 +265,30 @@ func TestCompletion_HistoryAssembly(t *testing.T) {
 	cases := []struct {
 		name         string
 		history      int
-		systemPrompt string
 		wantRoles    []string // includes system if present
 		wantLastUser string
 	}{
-		// The trailing RoleSystem after the date (and optional prompt) is
-		// the state-of-dress reminder — `full` has assistant turns, so
-		// lastNaked always emits it.
+		// The rendered persona prompt is always present now (it's
+		// hardcoded with placeholder substitution), so every case
+		// expects two leading RoleSystem entries — the date stamp and
+		// the persona — plus the state-of-dress reminder before the
+		// user turns (`full` has assistant turns, so lastNaked emits it).
 		{
 			name:         "no history sends only the latest user turn",
 			history:      0,
-			wantRoles:    []string{RoleSystem, RoleSystem, RoleUser},
+			wantRoles:    []string{RoleSystem, RoleSystem, RoleSystem, RoleUser},
 			wantLastUser: "u3",
 		},
 		{
 			name:         "history cap larger than transcript sends everything",
 			history:      99,
-			wantRoles:    []string{RoleSystem, RoleSystem, RoleUser, RoleAssistant, RoleUser, RoleAssistant, RoleUser},
+			wantRoles:    []string{RoleSystem, RoleSystem, RoleSystem, RoleUser, RoleAssistant, RoleUser, RoleAssistant, RoleUser},
 			wantLastUser: "u3",
 		},
 		{
 			name:         "history cap of 3 sends the last 3 messages",
 			history:      3,
-			wantRoles:    []string{RoleSystem, RoleSystem, RoleUser, RoleAssistant, RoleUser},
-			wantLastUser: "u3",
-		},
-		{
-			name:         "system prompt is prepended",
-			history:      99,
-			systemPrompt: "you are diesel",
-			wantRoles:    []string{RoleSystem, RoleSystem, RoleSystem, RoleUser, RoleAssistant, RoleUser, RoleAssistant, RoleUser},
-			wantLastUser: "u3",
-		},
-		{
-			name:         "system prompt with whitespace-only is dropped",
-			history:      99,
-			systemPrompt: "   \n  ",
-			wantRoles:    []string{RoleSystem, RoleSystem, RoleUser, RoleAssistant, RoleUser, RoleAssistant, RoleUser},
+			wantRoles:    []string{RoleSystem, RoleSystem, RoleSystem, RoleUser, RoleAssistant, RoleUser},
 			wantLastUser: "u3",
 		},
 	}
@@ -313,7 +300,9 @@ func TestCompletion_HistoryAssembly(t *testing.T) {
 					APIEndpoint:     srv.URL,
 					Model:           "m",
 					HistoryMessages: tc.history,
-					SystemPrompt:    tc.systemPrompt,
+					FirstName:       "Alex",
+					LastName:        "Doe",
+					PetName:         "Mittens",
 				},
 				full,
 			)

@@ -12,6 +12,52 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestIdentityConfigured(t *testing.T) {
+	cases := []struct {
+		name             string
+		first, last, pet string
+		want             bool
+	}{
+		{"all empty (fresh install)", "", "", "", false},
+		{"first only", "Alex", "", "", false},
+		{"last only", "", "Doe", "", false},
+		{"pet only", "", "", "Mittens", false},
+		{"missing pet", "Alex", "Doe", "", false},
+		{"whitespace counts as empty", " ", "\t", "\n", false},
+		{"all three filled", "Alex", "Doe", "Mittens", true},
+		{"trimmed values still count", "  Alex  ", "Doe", "Mittens", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := AppSettings{FirstName: tc.first, LastName: tc.last, PetName: tc.pet}
+			assert.Equal(t, tc.want, s.IdentityConfigured())
+		})
+	}
+}
+
+func TestRenderSystemPrompt(t *testing.T) {
+	s := AppSettings{FirstName: "Sentinel-First", LastName: "Sentinel-Last", PetName: "Sentinel-Pet"}
+	out := RenderSystemPrompt(s)
+
+	// Every placeholder should have been substituted — leaving a literal
+	// {first_name} etc. in the rendered prompt is the failure mode a typo
+	// in either the const or RenderSystemPrompt would produce.
+	assert.NotContains(t, out, "{first_name}")
+	assert.NotContains(t, out, "{last_name}")
+	assert.NotContains(t, out, "{pet_name}")
+
+	// All three sentinels appear at least once — proves the placeholders
+	// existed in the const and got rewritten, not just stripped.
+	assert.Contains(t, out, "Sentinel-First")
+	assert.Contains(t, out, "Sentinel-Last")
+	assert.Contains(t, out, "Sentinel-Pet")
+
+	// The original hardcoded names must not survive — guards against a
+	// future edit reintroducing "Tyr"/"Mactire"/"Beckett" literally.
+	assert.NotContains(t, out, "Tyr Mactire")
+	assert.NotContains(t, out, "Beckett")
+}
+
 func TestEstimateTokens(t *testing.T) {
 	cases := []struct {
 		name, in string
@@ -41,7 +87,9 @@ func TestDefault_HasExpectedDefaults(t *testing.T) {
 	assert.True(t, s.EnableTTS)
 	assert.True(t, s.SaveToDisk)
 	assert.False(t, s.EnableImageGen, "image gen should default off — needs separate ComfyUI")
-	assert.NotEmpty(t, s.SystemPrompt, "system prompt has a baked-in default")
+	assert.Empty(t, s.FirstName, "identity is empty by default — user must configure before chatting")
+	assert.Empty(t, s.LastName)
+	assert.Empty(t, s.PetName)
 	assert.Equal(t, "http://127.0.0.1:8188", s.ComfyUIEndpoint)
 	assert.Equal(t, 10, s.ImageSteps, "image steps default seeds the bundled workflow's Steps node")
 	assert.False(t, s.EnableServer, "HTTP server is opt-in")
@@ -332,7 +380,9 @@ func TestSetBackend_SaveLoadRoundTrip(t *testing.T) {
 		APIEndpoint:     "http://test.invalid/v1",
 		APIKey:          "sk-test",
 		Model:           "gpt-test",
-		SystemPrompt:    "be helpful",
+		FirstName:       "Alex",
+		LastName:        "Doe",
+		PetName:         "Mittens",
 		HistoryMessages: 10,
 		EnableTTS:       false,
 		TTSModel:        "tts-2",

@@ -356,6 +356,15 @@ func (h *Hub) Send(ctx context.Context, text, origin string, landscape bool) err
 	if text == "" {
 		return errors.New("empty message")
 	}
+	// Identity check sits ahead of any state mutation so a misconfigured
+	// install never leaves a half-exchange in history. The persona prompt
+	// has {first_name}/{last_name}/{pet_name} holes that the UI gates the
+	// Send button on; this is the safety net for bridges (SMS/Telegram/
+	// Matrix/HTTP) that don't have a button to disable.
+	s := settings.Load()
+	if !s.IdentityConfigured() {
+		return errors.New("identity not configured: set first name, last name, and pet name in Settings")
+	}
 	h.mu.Lock()
 	if h.inFlight {
 		h.mu.Unlock()
@@ -372,7 +381,6 @@ func (h *Hub) Send(ctx context.Context, text, origin string, landscape bool) err
 	turnID := h.nextTurnID
 	h.mu.Unlock()
 
-	s := settings.Load()
 	// The user message isn't persisted yet — it's written together with
 	// the assistant reply once the turn succeeds, so a failed turn leaves
 	// no dangling half-exchange on disk.

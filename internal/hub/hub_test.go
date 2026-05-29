@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"diesel/internal/comfyui"
+	"diesel/internal/settings"
 	"diesel/internal/storage"
 
 	"github.com/stretchr/testify/assert"
@@ -15,12 +16,26 @@ import (
 )
 
 // newTestStore opens a throwaway SQLite database in a temp dir, closed
-// automatically when the test ends.
+// automatically when the test ends. It also wires the settings backend
+// to an in-memory stub seeded with valid identity fields — hub.Send
+// refuses to dispatch otherwise, which would defeat tests that aren't
+// about identity gating.
 func newTestStore(t *testing.T) *storage.Store {
 	t.Helper()
 	st, err := storage.Open(filepath.Join(t.TempDir(), "diesel.db"))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = st.Close() })
+
+	stub := settings.AppSettings{
+		FirstName: "Alex",
+		LastName:  "Doe",
+		PetName:   "Mittens",
+	}
+	settings.SetBackend(
+		func() settings.AppSettings { return stub },
+		func(s settings.AppSettings) error { stub = s; return nil },
+	)
+	t.Cleanup(func() { settings.SetBackend(nil, nil) })
 	return st
 }
 

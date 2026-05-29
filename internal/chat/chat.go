@@ -214,7 +214,6 @@ func Completion(ctx context.Context, s settings.AppSettings, history []Message) 
 	ctx, span := tracing.StartSpan(ctx, "llm.chat",
 		attribute.String("llm.model", s.Model),
 		attribute.Int("llm.history.messages", len(history)),
-		attribute.Bool("llm.system_prompt", strings.TrimSpace(s.SystemPrompt) != ""),
 	)
 	defer span.End()
 
@@ -238,9 +237,7 @@ func Completion(ctx context.Context, s settings.AppSettings, history []Message) 
 		Role:    RoleSystem,
 		Content: "Current date and time: " + time.Now().Format("Monday, January 2, 2006 at 3:04 PM MST"),
 	})
-	if sp := strings.TrimSpace(s.SystemPrompt); sp != "" {
-		msgs = append(msgs, Message{Role: RoleSystem, Content: sp})
-	}
+	msgs = append(msgs, Message{Role: RoleSystem, Content: settings.RenderSystemPrompt(s)})
 	// Remind the model of the expression it last wore so the portrait
 	// emotion has some turn-to-turn continuity. Skipped on the first turn
 	// of a conversation, where there's no prior assistant reply.

@@ -180,14 +180,6 @@
     }
   }
 
-  function estimateTokens(text: string): number {
-    // Same chars/4 heuristic the Go side uses (settings.EstimateTokens)
-    // so the displayed count matches between the two UIs.
-    const trimmed = text.trim();
-    if (!trimmed) return 0;
-    return Math.ceil([...trimmed].length / 4);
-  }
-
   function saveToken() {
     authToken.set(token.trim());
   }
@@ -279,9 +271,14 @@
                 {/each}
               </datalist>
             </label>
-            <label>System prompt
-              <textarea bind:value={settings.system_prompt} rows="8"></textarea>
-              <small class="hint right">~{estimateTokens(settings.system_prompt)} tokens</small>
+            <label>First name
+              <input type="text" bind:value={settings.first_name} />
+            </label>
+            <label>Last name
+              <input type="text" bind:value={settings.last_name} />
+            </label>
+            <label>Pet name
+              <input type="text" bind:value={settings.pet_name} />
             </label>
             <div class="kv">
               <span>Context length:</span>
@@ -501,7 +498,7 @@
     color: var(--text);
   }
   .form input[type="checkbox"] { width: auto; margin: 0; flex: none; }
-  .form input, .form textarea, .form select {
+  .form input, .form select {
     width: 100%;
     color: var(--text);
     background: var(--panel);
@@ -510,10 +507,8 @@
     padding: 0.4rem 0.5rem;
     font: inherit;
   }
-  .form textarea { resize: vertical; font-family: inherit; }
   .form select { padding: 0.35rem 0.5rem; }
   .hint { color: var(--muted); font-size: 0.78rem; }
-  .hint.right { align-self: flex-end; }
   .kv {
     display: flex;
     justify-content: space-between;
