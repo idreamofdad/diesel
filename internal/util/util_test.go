@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -91,6 +92,27 @@ func TestAtomicWriteFile_OverwritesExisting(t *testing.T) {
 	got, err := os.ReadFile(target)
 	require.NoError(t, err)
 	assert.Equal(t, "new", string(got))
+}
+
+func TestAsync_DeliversResultOffCallingGoroutine(t *testing.T) {
+	started := make(chan struct{})
+	done := make(chan string, 1)
+	Async(
+		func() string {
+			<-started // prove work runs after Async returns, not inline
+			return "result"
+		},
+		func(s string) { done <- s },
+	)
+	// If work ran inline, Async would block here forever waiting on started.
+	close(started)
+
+	select {
+	case got := <-done:
+		assert.Equal(t, "result", got)
+	case <-time.After(2 * time.Second):
+		t.Fatal("onDone never fired")
+	}
 }
 
 func TestHttpStatusError(t *testing.T) {

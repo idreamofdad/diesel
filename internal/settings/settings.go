@@ -406,7 +406,7 @@ func FetchTTSModels(endpoint, apiKey string) ([]string, error) {
 // shim, and any unrecognized server land here). The caller renders that
 // as "not reported" so the UI is honest about what we can and can't see.
 // All probes share a short timeout — this runs synchronously off the UI
-// thread (via util.PollAsync) and shouldn't keep the dialog waiting.
+// thread (via util.Async) and shouldn't keep the dialog waiting.
 func FetchModelContextLength(endpoint, apiKey, modelID string) int {
 	endpoint = util.NormalizeEndpoint(endpoint)
 	if endpoint == "" || strings.TrimSpace(modelID) == "" {
