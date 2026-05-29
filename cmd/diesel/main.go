@@ -393,18 +393,42 @@ func main() {
 		recordGlyphIdle   = "◉"
 		recordGlyphActive = "⏹"
 	)
+	// Three orthogonal axes gate the text input + Send button:
+	//   - recording: voice capture in progress
+	//   - inFlight:  the hub is mid-turn (any origin)
+	//   - identity:  FirstName / LastName / PetName all filled in settings
+	// refreshInputEnabled collapses them into a single SetEnabled call so
+	// every site that toggles one axis stays consistent. Identity is read
+	// fresh each call (cheap; settings.Load is in-memory after first call).
+	var (
+		recording bool
+		inFlight  bool
+	)
+	const identityHint = "Set first name, last name, and pet name in Settings → LLM."
+	refreshInputEnabled := func() {
+		identity := settings.Load().IdentityConfigured()
+		enabled := !recording && !inFlight && identity
+		message.SetEnabled(enabled)
+		sendBtn.SetEnabled(enabled)
+		if !identity {
+			message.SetPlaceholderText(identityHint)
+			message.SetToolTip(identityHint)
+			sendBtn.SetToolTip(identityHint)
+		} else {
+			message.SetPlaceholderText("Type a message...")
+			message.SetToolTip("")
+			sendBtn.SetToolTip("")
+		}
+	}
 	setRecordingUI := func(active bool) {
+		recording = active
 		if active {
 			recordBtn.SetText(recordGlyphActive)
-			uploadBtn.SetEnabled(true)
-			message.SetEnabled(false)
-			sendBtn.SetEnabled(false)
 		} else {
 			recordBtn.SetText(recordGlyphIdle)
-			uploadBtn.SetEnabled(true)
-			message.SetEnabled(true)
-			sendBtn.SetEnabled(true)
 		}
+		uploadBtn.SetEnabled(true)
+		refreshInputEnabled()
 	}
 
 	sendDesktopMessage := func(text string, viaVoice bool) {
@@ -432,8 +456,8 @@ func main() {
 			// Lock the UI regardless of origin — only one turn runs at
 			// a time, so remote-initiated turns should also disable our
 			// Send button to keep the user from racing.
-			sendBtn.SetEnabled(false)
-			message.SetEnabled(false)
+			inFlight = true
+			refreshInputEnabled()
 		case hub.EventTurnComplete:
 			// Text-only event now — audio and portrait arrive on
 			// their own events as they finish. Re-enable input the
@@ -442,8 +466,8 @@ func main() {
 			if ev.Assistant != nil {
 				chat.AppendTurn(transcript, "Diesel", ev.Assistant.Content, labelBlue)
 			}
-			sendBtn.SetEnabled(true)
-			message.SetEnabled(true)
+			inFlight = false
+			refreshInputEnabled()
 			message.SetFocus()
 			if ev.Usage != nil {
 				total := ev.Usage.TotalTokens
@@ -509,8 +533,8 @@ func main() {
 				chat.AppendTurn(transcript, "Error", ev.Error, labelRed)
 				lastDesktopWasVoice = false
 			}
-			sendBtn.SetEnabled(true)
-			message.SetEnabled(true)
+			inFlight = false
+			refreshInputEnabled()
 		case hub.EventStatus:
 			setStatus(ev.Status)
 		case hub.EventCleared:
@@ -644,8 +668,16 @@ func main() {
 	prefsAction.SetMenuRole(qt.QAction__PreferencesRole)
 	prefsAction.OnTriggered(func() {
 		showSettingsDialog(window.QWidget, srvMgr, smsMgr, tgMgr, mxMgr)
+		// Identity is one of the gating axes for the Send affordance —
+		// re-evaluate after the dialog closes so saving changes flips
+		// the input from disabled to enabled (or back) immediately.
+		refreshInputEnabled()
 	})
 	fileMenu.AddAction(prefsAction)
+
+	// Initial input gate — if a fresh install lacks identity, the Send
+	// button starts greyed with the configure-me hint.
+	refreshInputEnabled()
 
 	window.Show()
 	qt.QApplication_Exec()
@@ -820,29 +852,15 @@ func showSettingsDialog(parent *qt.QWidget, srvMgr *server.Manager, smsMgr *sms.
 	ttsVoice := qt.NewQLineEdit3(current.TTSVoice)
 	ttsVoice.SetPlaceholderText("alloy")
 
-	// System prompt.
-	systemPrompt := qt.NewQTextEdit(nil)
-	systemPrompt.SetPlaceholderText("Instructions sent to the model before each conversation…")
-	systemPrompt.SetPlainText(current.SystemPrompt)
-	systemPrompt.SetMinimumHeight(96)
-
-	tokenCount := qt.NewQLabel5("", nil)
-	tokenCount.SetStyleSheet("color: #888; font-size: 11px;")
-	tokenCount.SetAlignment(qt.AlignRight | qt.AlignVCenter)
-	systemPromptCol := qt.NewQVBoxLayout2()
-	systemPromptCol.SetSpacing(2)
-	systemPromptCol.AddWidget(systemPrompt.QWidget)
-	systemPromptCol.AddWidget(tokenCount.QWidget)
-	updateTokenCount := func() {
-		n := settings.EstimateTokens(systemPrompt.ToPlainText())
-		if n == 0 {
-			tokenCount.SetText("0 tokens")
-		} else {
-			tokenCount.SetText(fmt.Sprintf("~%d tokens", n))
-		}
-	}
-	systemPrompt.OnTextChanged(updateTokenCount)
-	updateTokenCount()
+	// Identity. Three single-line inputs that get substituted into the
+	// hardcoded persona prompt. Send is gated on all three being filled —
+	// see refreshInputEnabled in the main window.
+	firstName := qt.NewQLineEdit3(current.FirstName)
+	firstName.SetPlaceholderText("First name")
+	lastName := qt.NewQLineEdit3(current.LastName)
+	lastName.SetPlaceholderText("Last name")
+	petName := qt.NewQLineEdit3(current.PetName)
+	petName.SetPlaceholderText("Pet name")
 
 	// Context length.
 	contextLabel := qt.NewQLabel5("—", nil)
@@ -999,22 +1017,6 @@ func showSettingsDialog(parent *qt.QWidget, srvMgr *server.Manager, smsMgr *sms.
 	comfyEndpoint := qt.NewQLineEdit3(current.ComfyUIEndpoint)
 	comfyEndpoint.SetPlaceholderText("http://127.0.0.1:8188")
 
-	imagePromptEdit := qt.NewQTextEdit(nil)
-	imagePromptEdit.SetPlaceholderText("How Diesel should look…")
-	imagePromptEdit.SetPlainText(current.ImagePrompt)
-	imagePromptEdit.SetMinimumHeight(240)
-	imageClothingEdit := qt.NewQTextEdit(nil)
-	imageClothingEdit.SetPlaceholderText("e.g. wearing a blue t-shirt and blue jeans")
-	imageClothingEdit.SetPlainText(current.ImageClothing)
-	imageClothingEdit.SetMinimumHeight(72)
-	imageNudityEdit := qt.NewQTextEdit(nil)
-	imageNudityEdit.SetPlaceholderText("e.g. completely nude, naked, no clothing")
-	imageNudityEdit.SetPlainText(current.ImageNudity)
-	imageNudityEdit.SetMinimumHeight(72)
-	imageNegEdit := qt.NewQTextEdit(nil)
-	imageNegEdit.SetPlaceholderText("things to keep out of the image")
-	imageNegEdit.SetPlainText(current.ImageNegativePrompt)
-	imageNegEdit.SetMinimumHeight(180)
 	imageSteps := qt.NewQSpinBox(nil)
 	imageSteps.SetRange(1, 200)
 	imageSteps.SetSingleStep(1)
@@ -1156,7 +1158,9 @@ func showSettingsDialog(parent *qt.QWidget, srvMgr *server.Manager, smsMgr *sms.
 	llmForm.AddRow3("API endpoint:", endpoint.QWidget)
 	llmForm.AddRow3("API key:", apiKey.QWidget)
 	llmForm.AddRow3("Model:", model.QWidget)
-	llmForm.AddRow4("System prompt:", systemPromptCol.QLayout)
+	llmForm.AddRow3("First name:", firstName.QWidget)
+	llmForm.AddRow3("Last name:", lastName.QWidget)
+	llmForm.AddRow3("Pet name:", petName.QWidget)
 	llmForm.AddRow3("Context length:", contextLabel.QWidget)
 	llmForm.AddRow3("Message history:", historyMessages.QWidget)
 	llmForm.AddRowWithLayout(llmTestRow.QLayout)
@@ -1185,10 +1189,6 @@ func showSettingsDialog(parent *qt.QWidget, srvMgr *server.Manager, smsMgr *sms.
 	imgForm.AddRowWithWidget(enableImageGen.QWidget)
 	imgForm.AddRow3("ComfyUI endpoint:", comfyEndpoint.QWidget)
 	imgForm.AddRow3("Steps:", imageSteps.QWidget)
-	imgForm.AddRow3("Image prompt:", imagePromptEdit.QWidget)
-	imgForm.AddRow3("Clothing:", imageClothingEdit.QWidget)
-	imgForm.AddRow3("Nudity:", imageNudityEdit.QWidget)
-	imgForm.AddRow3("Negative prompt:", imageNegEdit.QWidget)
 	imgForm.AddRowWithLayout(imgTestRow.QLayout)
 
 	// Server tab.
@@ -1262,7 +1262,9 @@ func showSettingsDialog(parent *qt.QWidget, srvMgr *server.Manager, smsMgr *sms.
 			APIEndpoint:             endpoint.Text(),
 			APIKey:                  apiKey.Text(),
 			Model:                   model.CurrentText(),
-			SystemPrompt:            systemPrompt.ToPlainText(),
+			FirstName:               firstName.Text(),
+			LastName:                lastName.Text(),
+			PetName:                 petName.Text(),
 			HistoryMessages:         historyMessages.Value(),
 			STTEndpoint:             sttEndpoint.Text(),
 			STTAPIKey:               sttAPIKey.Text(),
@@ -1278,10 +1280,6 @@ func showSettingsDialog(parent *qt.QWidget, srvMgr *server.Manager, smsMgr *sms.
 			SaveToDisk:              autoSave.IsChecked(),
 			EnableImageGen:          enableImageGen.IsChecked(),
 			ComfyUIEndpoint:         comfyEndpoint.Text(),
-			ImagePrompt:             imagePromptEdit.ToPlainText(),
-			ImageClothing:           imageClothingEdit.ToPlainText(),
-			ImageNudity:             imageNudityEdit.ToPlainText(),
-			ImageNegativePrompt:     imageNegEdit.ToPlainText(),
 			ImageSteps:              imageSteps.Value(),
 			EnableServer:            enableServer.IsChecked(),
 			ServerExposeNetwork:     serverExpose.IsChecked(),

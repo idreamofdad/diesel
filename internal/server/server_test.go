@@ -24,12 +24,26 @@ import (
 func init() { gin.SetMode(gin.TestMode) }
 
 // newTestHub returns a hub backed by a throwaway SQLite database in a
-// temp dir, closed automatically when the test ends.
+// temp dir, closed automatically when the test ends. It also wires the
+// settings backend to an in-memory stub with valid identity fields so
+// hub.Send is willing to dispatch — tests here aren't about identity
+// gating, and the bare default returns empties which Send rejects.
 func newTestHub(t *testing.T) *hub.Hub {
 	t.Helper()
 	st, err := storage.Open(filepath.Join(t.TempDir(), "diesel.db"))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = st.Close() })
+
+	stub := settings.AppSettings{
+		FirstName: "Alex",
+		LastName:  "Doe",
+		PetName:   "Mittens",
+	}
+	settings.SetBackend(
+		func() settings.AppSettings { return stub },
+		func(s settings.AppSettings) error { stub = s; return nil },
+	)
+	t.Cleanup(func() { settings.SetBackend(nil, nil) })
 	return hub.New(st)
 }
 
@@ -123,7 +137,7 @@ func TestLooksLikeAsset(t *testing.T) {
 		{"assets/index-abc.js", true},
 		{"deep/nested/file.css", true},
 		{"silero_vad_v5.onnx", true},
-		{"settings", false},      // SPA route — no extension
+		{"settings", false}, // SPA route — no extension
 		{"app/conversation", false},
 		{"", false},
 	}

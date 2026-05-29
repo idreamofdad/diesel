@@ -356,6 +356,15 @@ func (h *Hub) Send(ctx context.Context, text, origin string, landscape bool) err
 	if text == "" {
 		return errors.New("empty message")
 	}
+	// Identity check sits ahead of any state mutation so a misconfigured
+	// install never leaves a half-exchange in history. The persona prompt
+	// has {first_name}/{last_name}/{pet_name} holes that the UI gates the
+	// Send button on; this is the safety net for bridges (SMS/Telegram/
+	// Matrix/HTTP) that don't have a button to disable.
+	s := settings.Load()
+	if !s.IdentityConfigured() {
+		return errors.New("identity not configured: set first name, last name, and pet name in Settings")
+	}
 	h.mu.Lock()
 	if h.inFlight {
 		h.mu.Unlock()
@@ -372,7 +381,6 @@ func (h *Hub) Send(ctx context.Context, text, origin string, landscape bool) err
 	turnID := h.nextTurnID
 	h.mu.Unlock()
 
-	s := settings.Load()
 	// The user message isn't persisted yet — it's written together with
 	// the assistant reply once the turn succeeds, so a failed turn leaves
 	// no dangling half-exchange on disk.
@@ -435,7 +443,15 @@ func (h *Hub) runTurn(ctx context.Context, s settings.AppSettings, user chat.Mes
 		return
 	}
 
-	assistant := chat.Message{Role: chat.RoleAssistant, Content: reply.Text, Emotion: reply.Emotion, Naked: reply.Naked, Timestamp: time.Now()}
+	assistant := chat.Message{
+		Role:       chat.RoleAssistant,
+		Content:    reply.Text,
+		Emotion:    reply.Emotion,
+		Naked:      reply.Naked,
+		Background: reply.Background,
+		Pose:       reply.Pose,
+		Timestamp:  time.Now(),
+	}
 	h.mu.Lock()
 	h.history = append(h.history, assistant)
 	// Clear inFlight as soon as text lands so the user can immediately
@@ -521,7 +537,7 @@ func (h *Hub) renderPortrait(ctx context.Context, s settings.AppSettings, reply 
 	if !s.EnableImageGen {
 		return
 	}
-	prompt := composeImagePrompt(s, reply.Emotion, reply.Naked)
+	prompt := composeImagePrompt(reply.Emotion, reply.Background, reply.Pose, reply.Naked)
 	// Stream sampler steps and intermediate preview frames as
 	// EventPortraitProgress so subscribers can paint the image as it
 	// develops. Preview bytes go into the previews cache and a
@@ -551,7 +567,7 @@ func (h *Hub) renderPortrait(ctx context.Context, s settings.AppSettings, reply 
 		}
 		h.broadcast(ev)
 	}
-	png, err := comfyui.Generate(ctx, s, prompt, s.ImageNegativePrompt, reply.Naked, landscape, onProgress)
+	png, err := comfyui.Generate(ctx, s, prompt, reply.Naked, landscape, onProgress)
 	if err != nil || len(png) == 0 {
 		return
 	}
@@ -563,26 +579,42 @@ func (h *Hub) renderPortrait(ctx context.Context, s settings.AppSettings, reply 
 	ev.PortraitURL = "/api/v1/portrait/" + id
 }
 
-// composeImagePrompt assembles the image prompt the same way the
-// previous main.go code did — base prompt, clothing or nudity splice,
-// then the emotion fragment. Kept here so the hub remains the single
-// owner of the pipeline; main.go no longer needs to know the recipe.
-func composeImagePrompt(s settings.AppSettings, emotion string, naked bool) string {
-	prompt := trimSpace(s.ImagePrompt)
-	switch {
-	case naked:
-		if frag := trimSpace(s.ImageNudity); frag != "" {
-			prompt = prompt + ", " + frag
-		}
-	default:
-		if frag := trimSpace(s.ImageClothing); frag != "" {
-			prompt = prompt + ", " + frag
+// composeImagePrompt assembles the image prompt from comfyui's hardcoded
+// fragments and the chat-driven scene/posture/expression slugs. Order is
+// Booru convention for Illustrious-family checkpoints:
+//
+//	quality → character → pose-base + pose-addon → background → clothing|nudity → emotion
+//
+// Subject identity goes early so the renderer locks onto the character,
+// pose drives the silhouette before the scene populates around it, and
+// expression lands last so it modulates an already-coherent face rather
+// than competing with structural tags. Empty/unknown slugs no-op
+// gracefully (chat.go guards against this on the inbound side, but the
+// belt-and-braces lookups make the composition tolerant of conversation
+// files written before the matrix existed).
+//
+// Lives in hub because it's the only place that knows the full recipe —
+// comfyui owns the fragment strings, chat owns the slug enums.
+func composeImagePrompt(emotion, background, pose string, naked bool) string {
+	parts := []string{comfyui.ImageQualityPrefix, comfyui.ImagePrompt}
+	if spec, ok := comfyui.ImagePoseBases[trimSpace(pose)]; ok {
+		parts = append(parts, spec.Tags)
+		if addon := comfyui.ImagePoseAddons[trimSpace(pose)][trimSpace(background)]; addon != "" {
+			parts = append(parts, addon)
 		}
 	}
-	if frag := chat.EmotionPrompts[trimSpace(emotion)]; frag != "" {
-		prompt = prompt + ", " + frag
+	if spec, ok := comfyui.ImageBackgrounds[trimSpace(background)]; ok {
+		parts = append(parts, spec.Tags)
 	}
-	return prompt
+	if naked {
+		parts = append(parts, comfyui.ImageNudity)
+	} else {
+		parts = append(parts, comfyui.ImageClothing)
+	}
+	if frag := comfyui.EmotionPrompts[trimSpace(emotion)]; frag != "" {
+		parts = append(parts, frag)
+	}
+	return strings.Join(parts, ", ")
 }
 
 // setStatus updates the cached status string and broadcasts it.

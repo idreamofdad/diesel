@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"diesel/internal/comfyui"
+	"diesel/internal/settings"
 	"diesel/internal/storage"
 
 	"github.com/stretchr/testify/assert"
@@ -14,12 +16,26 @@ import (
 )
 
 // newTestStore opens a throwaway SQLite database in a temp dir, closed
-// automatically when the test ends.
+// automatically when the test ends. It also wires the settings backend
+// to an in-memory stub seeded with valid identity fields — hub.Send
+// refuses to dispatch otherwise, which would defeat tests that aren't
+// about identity gating.
 func newTestStore(t *testing.T) *storage.Store {
 	t.Helper()
 	st, err := storage.Open(filepath.Join(t.TempDir(), "diesel.db"))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = st.Close() })
+
+	stub := settings.AppSettings{
+		FirstName: "Alex",
+		LastName:  "Doe",
+		PetName:   "Mittens",
+	}
+	settings.SetBackend(
+		func() settings.AppSettings { return stub },
+		func(s settings.AppSettings) error { stub = s; return nil },
+	)
+	t.Cleanup(func() { settings.SetBackend(nil, nil) })
 	return st
 }
 
@@ -141,22 +157,69 @@ func TestSend_DetachesCallerContext(t *testing.T) {
 		"runTurn inherited caller's canceled context")
 }
 
-// TestComposeImagePrompt covers the three splice paths — clothing
-// when dressed, nudity when naked, emotion always.
+// TestComposeImagePrompt covers the splice paths: quality prefix and
+// character always present; pose-base + pose-addon; background; clothing
+// vs nudity; emotion always (no-op on neutral). The matrix lookups are
+// the load-bearing part — a missing pose/background slug must not crash,
+// and the splice fragments must land in the prompt verbatim.
 func TestComposeImagePrompt(t *testing.T) {
-	s := settingsFixture()
-
-	got := composeImagePrompt(s, "happy", false)
-	assert.Contains(t, got, "BASE")
-	assert.Contains(t, got, "CLOTHING")
+	got := composeImagePrompt("happy", "living_room", "standing", false)
+	assert.Contains(t, got, comfyui.ImageQualityPrefix)
+	assert.Contains(t, got, comfyui.ImagePrompt)
+	assert.Contains(t, got, comfyui.ImagePoseBases["standing"].Tags)
+	assert.Contains(t, got, comfyui.ImagePoseAddons["standing"]["living_room"])
+	assert.Contains(t, got, comfyui.ImageBackgrounds["living_room"].Tags)
+	assert.Contains(t, got, comfyui.ImageClothing)
 	assert.Contains(t, got, "warm smile")
-	assert.NotContains(t, got, "NUDE")
+	assert.NotContains(t, got, comfyui.ImageNudity)
 
-	got = composeImagePrompt(s, "happy", true)
-	assert.Contains(t, got, "NUDE")
-	assert.NotContains(t, got, "CLOTHING")
+	got = composeImagePrompt("happy", "pub", "sitting", true)
+	assert.Contains(t, got, comfyui.ImagePoseBases["sitting"].Tags)
+	assert.Contains(t, got, comfyui.ImagePoseAddons["sitting"]["pub"])
+	assert.Contains(t, got, comfyui.ImageBackgrounds["pub"].Tags)
+	assert.Contains(t, got, comfyui.ImageNudity)
+	assert.NotContains(t, got, comfyui.ImageClothing)
 
-	got = composeImagePrompt(s, "neutral", false)
-	// neutral emotion = empty splice, prompt stays minimal
-	assert.Equal(t, "BASE, CLOTHING", got)
+	// Neutral emotion contributes no expression tags, but every other
+	// splice still fires — verify by reconstructing the expected string
+	// in the documented order.
+	got = composeImagePrompt("neutral", "forest_park", "bent_over", false)
+	want := comfyui.ImageQualityPrefix +
+		", " + comfyui.ImagePrompt +
+		", " + comfyui.ImagePoseBases["bent_over"].Tags +
+		", " + comfyui.ImagePoseAddons["bent_over"]["forest_park"] +
+		", " + comfyui.ImageBackgrounds["forest_park"].Tags +
+		", " + comfyui.ImageClothing
+	assert.Equal(t, want, got)
+
+	// Unknown slugs no-op gracefully so older saved conversations (and
+	// any malformed reply that slips past the schema) still produce a
+	// renderable prompt rather than panicking on a nil-map lookup.
+	got = composeImagePrompt("neutral", "atlantis", "moonwalk", false)
+	assert.Contains(t, got, comfyui.ImageQualityPrefix)
+	assert.Contains(t, got, comfyui.ImagePrompt)
+	assert.Contains(t, got, comfyui.ImageClothing)
+	assert.NotContains(t, got, "scenery")
+}
+
+// TestComposeImagePrompt_TagOrder verifies the Booru-convention ordering
+// is preserved. Drift here means the renderer sees the subject after the
+// scene (weaker character lock) or the emotion before the clothing (which
+// can blend expression into the outfit). Asserts by index lookup so it
+// fails noisily rather than just flagging a missing tag.
+func TestComposeImagePrompt_TagOrder(t *testing.T) {
+	got := composeImagePrompt("amused", "mechanics_shop", "standing", false)
+	idx := func(needle string) int { return strings.Index(got, needle) }
+	require.NotEqual(t, -1, idx(comfyui.ImageQualityPrefix))
+	require.NotEqual(t, -1, idx(comfyui.ImagePrompt))
+	require.NotEqual(t, -1, idx(comfyui.ImagePoseBases["standing"].Tags))
+	require.NotEqual(t, -1, idx(comfyui.ImageBackgrounds["mechanics_shop"].Tags))
+	require.NotEqual(t, -1, idx(comfyui.ImageClothing))
+	require.NotEqual(t, -1, idx("amused expression"))
+
+	assert.Less(t, idx(comfyui.ImageQualityPrefix), idx(comfyui.ImagePrompt))
+	assert.Less(t, idx(comfyui.ImagePrompt), idx(comfyui.ImagePoseBases["standing"].Tags))
+	assert.Less(t, idx(comfyui.ImagePoseBases["standing"].Tags), idx(comfyui.ImageBackgrounds["mechanics_shop"].Tags))
+	assert.Less(t, idx(comfyui.ImageBackgrounds["mechanics_shop"].Tags), idx(comfyui.ImageClothing))
+	assert.Less(t, idx(comfyui.ImageClothing), idx("amused expression"))
 }

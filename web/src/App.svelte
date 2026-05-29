@@ -10,6 +10,8 @@
     usage,
     sendMessage,
     muted,
+    identityConfigured,
+    fetchSettings,
   } from './lib/hub';
   import Transcript from './lib/Transcript.svelte';
   import ChatInput from './lib/ChatInput.svelte';
@@ -25,6 +27,7 @@
   let tokens = $state<{ prompt_tokens?: number; completion_tokens?: number; total_tokens?: number }>({});
   let mutedNow = $state(false);
   let showSettings = $state(false);
+  let identityOK = $state(false);
 
   // Wire the imperative stores to local $state — the templates can't
   // bind directly to a custom Writable, so we mirror via subscribe.
@@ -37,8 +40,13 @@
       connected.subscribe(v => { online = v; }),
       usage.subscribe(v => { tokens = v; }),
       muted.subscribe(v => { mutedNow = v; }),
+      identityConfigured.subscribe(v => { identityOK = v; }),
     ];
     connect();
+    // Seed identityConfigured on load — the WebSocket protocol doesn't
+    // carry settings, so the only way to know whether Send should be
+    // gated is to hit the REST endpoint once.
+    fetchSettings().catch(() => {});
     return () => unsubs.forEach(u => u());
   });
 
@@ -83,9 +91,12 @@
   <section class="body">
     <div class="left">
       <Transcript {messages} />
-      <ChatInput onsend={handleSend} disabled={busy} />
+      <ChatInput onsend={handleSend} disabled={busy || !identityOK} />
+      {#if !identityOK}
+        <small class="identity-hint">Set first, last, and pet name in Settings before chatting.</small>
+      {/if}
       <div class="mic-row">
-        <MicButton disabled={busy} />
+        <MicButton disabled={busy || !identityOK} />
       </div>
     </div>
     <div class="right">
@@ -149,5 +160,10 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+  .identity-hint {
+    font-size: 0.8rem;
+    color: var(--muted);
+    padding: 0 0.25rem;
   }
 </style>

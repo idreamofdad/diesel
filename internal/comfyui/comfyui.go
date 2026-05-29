@@ -258,7 +258,8 @@ type Progress struct {
 // intermediate preview frames as binary messages. It runs on the
 // goroutine driving Generate, so a Qt-thread caller should funnel
 // updates through a channel.
-func Generate(ctx context.Context, s settings.AppSettings, positive, negative string, naked, landscape bool, onProgress func(Progress)) ([]byte, error) {
+func Generate(ctx context.Context, s settings.AppSettings, positive string, naked, landscape bool, onProgress func(Progress)) ([]byte, error) {
+	negative := ImageNegativePrompt
 	ctx, span := tracing.StartSpan(ctx, "image.generate",
 		attribute.Int("image.prompt.length", len(positive)),
 		attribute.Int("image.negative_prompt.length", len(negative)),
@@ -278,14 +279,12 @@ func Generate(ctx context.Context, s settings.AppSettings, positive, negative st
 		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
-	// Multi-line user settings (Settings has QTextEdits for the base
-	// prompt, clothing, nudity, and negative fragments) come through with
-	// embedded newlines once spliced together. CLIPTextEncode tokenizes
-	// each line independently, which drops cross-line concept blending
-	// and tends to leave the trailing fragments under-weighted, so flatten
-	// to a single line before handing the prompts to the rewriter.
+	// The composed positive prompt arrives with embedded newlines from
+	// the hub's splice path. CLIPTextEncode tokenizes each line
+	// independently, which drops cross-line concept blending and tends
+	// to leave trailing fragments under-weighted, so flatten to a single
+	// line before handing the prompts to the rewriter.
 	positive = strings.ReplaceAll(positive, "\n", " ")
-	negative = strings.ReplaceAll(negative, "\n", " ")
 
 	// Parse a fresh graph per call — concurrent generations must never
 	// share the mutable node maps. Wrapped in its own span so the parse +

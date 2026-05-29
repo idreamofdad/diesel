@@ -92,6 +92,15 @@ export const inFlight: Writable<boolean> = writable(false);
 export const portraitURL: Writable<string> = writable('');
 export const connected: Writable<boolean> = writable(false);
 export const usage: Writable<Usage> = writable({});
+// identityConfigured mirrors the Go-side AppSettings.IdentityConfigured()
+// — true iff first/last/pet name are all non-empty after trim. Populated
+// by fetchSettings on app load and refreshed by saveSettings on dialog
+// accept, so the ChatInput disable flips the moment the user saves.
+export const identityConfigured: Writable<boolean> = writable(false);
+
+function deriveIdentityConfigured(s: AppSettings): boolean {
+  return !!(s.first_name?.trim() && s.last_name?.trim() && s.pet_name?.trim());
+}
 
 // ─── Connection ────────────────────────────────────────────────────────
 
@@ -310,7 +319,9 @@ export interface AppSettings {
   api_endpoint: string;
   api_key: string;
   model: string;
-  system_prompt: string;
+  first_name: string;
+  last_name: string;
+  pet_name: string;
   history_messages: number;
   stt_endpoint: string;
   stt_api_key: string;
@@ -340,7 +351,9 @@ export interface AppSettings {
 export async function fetchSettings(): Promise<AppSettings> {
   const resp = await fetch('/api/v1/settings', { headers: authHeaders() });
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-  return resp.json();
+  const s: AppSettings = await resp.json();
+  identityConfigured.set(deriveIdentityConfigured(s));
+  return s;
 }
 
 export async function saveSettings(s: AppSettings): Promise<AppSettings> {
@@ -353,7 +366,9 @@ export async function saveSettings(s: AppSettings): Promise<AppSettings> {
     const body = await resp.text();
     throw new Error(body || `HTTP ${resp.status}`);
   }
-  return resp.json();
+  const saved: AppSettings = await resp.json();
+  identityConfigured.set(deriveIdentityConfigured(saved));
+  return saved;
 }
 
 export interface ProbeBody {
