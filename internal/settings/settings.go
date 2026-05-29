@@ -205,7 +205,7 @@ func Default() AppSettings {
 		// server, so opting in is deliberate. The endpoint is ComfyUI's
 		// stock local address so enabling it usually "just works".
 		ComfyUIEndpoint: "http://127.0.0.1:8188",
-		ImageSteps:      10,
+		ImageSteps:      12,
 		// Server defaults off — opening a port is opt-in. 7777 picked
 		// because it's well outside reserved ranges and unlikely to
 		// collide with another local service. Loopback-only by default;
