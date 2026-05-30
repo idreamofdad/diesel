@@ -1,3 +1,5 @@
+//go:build cgo
+
 package main
 
 import (
@@ -6,18 +8,12 @@ import (
 	"fmt"
 	"log"
 	"strings"
-	"time"
 
+	dieselapp "diesel/internal/app"
 	"diesel/internal/audio"
 	"diesel/internal/chat"
 	"diesel/internal/hub"
-	"diesel/internal/matrix"
-	"diesel/internal/server"
 	"diesel/internal/settings"
-	"diesel/internal/sms"
-	"diesel/internal/storage"
-	"diesel/internal/telegram"
-	"diesel/internal/tracing"
 	"diesel/internal/tts"
 	"diesel/internal/util"
 
@@ -61,67 +57,20 @@ func main() {
 		util.SetConfigDir(*dataDir)
 	}
 
-	// OpenTelemetry: a no-op unless OTEL_EXPORTER_OTLP_ENDPOINT (or the
-	// trace-specific override) is set. Shutdown flushes in-flight spans on
-	// exit, bounded to 5 s so a stuck collector can't hang the app.
-	if shutdown, err := tracing.Init(context.Background()); err != nil {
-		log.Printf("[tracing] init failed: %v", err)
-	} else if shutdown != nil {
-		defer func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			if err := shutdown(ctx); err != nil {
-				log.Printf("[tracing] shutdown: %v", err)
-			}
-		}()
-	}
-
-	// SQLite-backed persistence: conversation history, the settings blob, and
-	// each bridge's bookkeeping all live in one database file. Opened before
-	// anything reads settings or history.
-	dbPath, err := util.ConfigFilePath("diesel.db")
+	// Open the database, wire settings persistence, start tracing + the hub,
+	// and stand up the bridge managers — shared with the headless daemon.
+	deps, cleanup, err := dieselapp.Wire(context.Background())
 	if err != nil {
-		log.Fatalf("[storage] config path: %v", err)
+		log.Fatalf("[startup] %v", err)
 	}
-	store, err := storage.Open(dbPath)
-	if err != nil {
-		log.Fatalf("[storage] open: %v", err)
-	}
-	defer func() { _ = store.Close() }()
-	// Wire the settings package to the database. settings can't import storage
-	// (storage imports settings), so persistence is injected.
-	settings.SetBackend(
-		func() settings.AppSettings {
-			s, err := store.LoadSettings(context.Background())
-			if err != nil {
-				log.Printf("[settings] load: %v", err)
-			}
-			return s
-		},
-		func(s settings.AppSettings) error {
-			return store.SaveSettings(context.Background(), s)
-		},
-	)
-
-	// Hub owns the conversation. Started before any UI so the persisted
-	// history is loaded by the time the window paints it.
-	h := hub.New(store)
-	h.Start(context.Background())
-
-	// HTTP server + bridges. Each has the same Apply/Stop shape — opt-in via
-	// settings, hot-reapplied on every Save.
-	srvMgr := server.New(h, embeddedWebFS())
+	h := deps.Hub
+	smsMgr := deps.SMS
+	tgMgr := deps.Telegram
+	mxMgr := deps.Matrix
+	// The desktop honors the EnableServer setting (the "also expose a remote
+	// web UI" toggle); the daemon forces the server on instead.
+	srvMgr := deps.Server
 	srvMgr.Apply(settings.Load())
-	defer srvMgr.Stop()
-	smsMgr := sms.New(h, store)
-	smsMgr.Apply(settings.Load())
-	defer smsMgr.Stop()
-	tgMgr := telegram.New(h, store)
-	tgMgr.Apply(settings.Load())
-	defer tgMgr.Stop()
-	mxMgr := matrix.New(h, store)
-	mxMgr.Apply(settings.Load())
-	defer mxMgr.Stop()
 
 	// ─── Fyne app + window ─────────────────────────────────────────────────
 	a := app.New()
@@ -462,13 +411,9 @@ func main() {
 
 	win.ShowAndRun()
 
-	// Teardown. Stop the server and bridges first so no in-flight handler
-	// touches a half-torn-down hub, then drop the subscription (which closes
-	// the drain channel) and stop the hub.
-	srvMgr.Stop()
-	smsMgr.Stop()
-	tgMgr.Stop()
-	mxMgr.Stop()
+	// Teardown. Drop the desktop subscription first (closing the drain
+	// channel), then cleanup() stops the server/bridges/hub and closes the
+	// database in dependency order.
 	h.Unsubscribe(desktopOrigin)
-	h.Stop()
+	cleanup()
 }

@@ -34,6 +34,24 @@ Enable the server from Settings → Server (and "Expose on network" to bind `0.0
 - **Telegram** — point a Telegram bot token at Diesel and the bot bridges chats into the hub over the Bot API's long-poll, so it works behind NAT with no public webhook.
 - **`/api/v1` HTTP + WebSocket API** — a versioned surface for building native clients (e.g. an Android app). REST endpoints cover state, sending, voice upload, and media fetch; a WebSocket streams turn, audio, and portrait events. The full contract is in [`docs/api-v1.md`](docs/api-v1.md), with a machine-readable OpenAPI 3.1 spec served at `/openapi.json`.
 
+## Running headless
+
+Diesel also builds as a headless daemon, **`dieseld`** — the hub, the HTTP server (web UI + `/api/v1`), and the SMS/Telegram/Matrix bridges, with no native window or audio. Voice still works end to end: the browser does capture, voice-activity detection, speech-to-text upload, and playback. The daemon contains **no cgo**, so it builds as a single static binary that cross-compiles cleanly and runs anywhere:
+
+```
+make daemon                                  # -> bin/dieseld
+# or directly:
+CGO_ENABLED=0 go build -tags goolm ./cmd/dieseld
+```
+
+Run it pointed at a data directory; the browser is the UI, and the web settings panel covers the chat/voice/image config:
+
+```
+dieseld -port 8080 -listen-all -auth-token <secret>
+```
+
+Bridge credentials are host-bound and read from the same `diesel.db` the desktop app writes, so configure those once with the desktop app (or share the database). The desktop app (`make desktop`) keeps the native window and native audio and requires cgo.
+
 ## License
 
 Released under the MIT License. See [LICENSE](LICENSE) for the full text.

@@ -1,3 +1,5 @@
+//go:build cgo
+
 // Command voicecheck is an interactive harness for the speech pipeline:
 // capture → VAD → STT (Whisper) → TTS synthesis → playback. It exists to
 // validate the malgo-backed audio I/O without standing up the full GUI.
