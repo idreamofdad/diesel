@@ -440,9 +440,13 @@ func main() {
 	win.SetMainMenu(fyne.NewMainMenu(fyne.NewMenu("File", newItem, settingsItem)))
 
 	// ─── Layout ────────────────────────────────────────────────────────────
+	const glyphBtnSize = float32(36)
+	squareBtn := func(b *widget.Button) fyne.CanvasObject {
+		return container.NewGridWrap(fyne.NewSize(glyphBtnSize, glyphBtnSize), b)
+	}
 	inputArea := container.NewVBox(
 		container.NewBorder(nil, nil, nil, sendBtn, message),
-		container.NewHBox(recordBtn, commitBtn),
+		container.NewHBox(squareBtn(recordBtn), squareBtn(commitBtn)),
 	)
 	convCol := container.NewBorder(
 		widget.NewLabelWithStyle("Conversation", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
