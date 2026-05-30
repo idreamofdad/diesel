@@ -7,8 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-
-	qt "github.com/mappu/miqt/qt6"
 )
 
 // NormalizeEndpoint trims whitespace and any trailing slash so callers can
@@ -85,22 +83,16 @@ func HTTPStatusError(resp *http.Response, snippetBytes int64) error {
 	return fmt.Errorf("HTTP %d: %s", resp.StatusCode, body)
 }
 
-// PollAsync runs `work` on a goroutine and delivers its result to `onDone`
-// on the Qt main thread. A QTimer polls a buffered channel at `intervalMS`
-// — the same shape used by the chat, TTS, and STT request paths so the UI
-// loop keeps ticking while the HTTP call is in flight.
-func PollAsync[T any](intervalMS int, work func() T, onDone func(T)) {
-	ch := make(chan T, 1)
-	go func() { ch <- work() }()
-	poller := qt.NewQTimer()
-	poller.SetSingleShot(false)
-	poller.OnTimeout(func() {
-		select {
-		case r := <-ch:
-			poller.Stop()
-			onDone(r)
-		default:
-		}
-	})
-	poller.Start(intervalMS)
+// Async runs `work` on a goroutine and hands its result to `onDone`,
+// exactly once. This is the shape the chat, TTS, and STT request paths use
+// to keep a blocking HTTP call off the caller's thread while still getting
+// the result back in one place.
+//
+// `onDone` runs on the worker goroutine — NOT on any GUI main thread — so a
+// caller that touches widgets must marshal that work onto its toolkit's UI
+// thread itself (e.g. fyne.Do). Keeping this package free of any GUI
+// dependency is deliberate: util is imported across the whole tree, so it
+// must not pull a windowing toolkit in behind it.
+func Async[T any](work func() T, onDone func(T)) {
+	go func() { onDone(work()) }()
 }

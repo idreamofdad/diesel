@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"html"
 	"net/http"
 	"regexp"
 	"strings"
@@ -16,31 +15,9 @@ import (
 	"diesel/internal/tracing"
 	"diesel/internal/util"
 
-	qt "github.com/mappu/miqt/qt6"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 )
-
-// AppendTurn writes a "<who>: <body>" paragraph to the transcript with the
-// speaker label rendered in `color`. Both args are HTML-escaped before
-// formatting and newlines in the body become <br> so multi-line replies
-// keep their line breaks — QTextEdit interprets Append() content as rich
-// text by default, which means unescaped user content would otherwise be
-// parsed (and characters like `<` would vanish).
-//
-// We move the cursor to the end and ensure it's visible after appending.
-// QTextEdit.Append only scrolls when the cursor was already at the end
-// before the append, so without this the view stays pinned to whatever
-// the user last clicked and the latest turn slides off the bottom.
-func AppendTurn(transcript *qt.QTextEdit, who, body, color string) {
-	safeBody := strings.ReplaceAll(html.EscapeString(body), "\n", "<br>")
-	transcript.Append(fmt.Sprintf(
-		`<span style="color:%s;"><b>%s:</b></span> %s`,
-		color, html.EscapeString(who), safeBody,
-	))
-	transcript.MoveCursor(qt.QTextCursor__End)
-	transcript.EnsureCursorVisible()
-}
 
 // Chat message roles, matching the OpenAI-compatible /chat/completions
 // schema. Defined as constants so the spellings live in one place.

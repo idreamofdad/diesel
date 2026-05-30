@@ -9,7 +9,9 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
+	"unsafe"
 
 	"diesel/internal/audio"
 	"diesel/internal/settings"
@@ -17,12 +19,30 @@ import (
 	"diesel/internal/util"
 	"diesel/internal/wav"
 
-	qt "github.com/mappu/miqt/qt6"
-	mm "github.com/mappu/miqt/qt6/multimedia"
+	"github.com/gen2brain/malgo"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 )
+
+// Playback device buffering. The default low-latency profile uses ~10 ms
+// periods, which means ~100 cgo callbacks/sec — an occasional Go GC or
+// scheduler pause then misses a period deadline and the listener hears a
+// gap (stutter). Speech playback doesn't care about latency, so we trade it
+// for a comfortable 100 ms deadline per callback and a 300 ms total buffer,
+// far beyond any realistic Go pause.
+const (
+	playbackPeriodMS = 100
+	playbackPeriods  = 3
+)
+
+// drainTailDelay is how long playback keeps the device open, emitting
+// silence, after the last real PCM sample has been handed to miniaudio. The
+// data callback runs ahead of the speaker, so the final samples are still
+// buffered in the backend when our PCM runs out; closing the device
+// immediately would clip the tail. It must exceed the device buffer
+// (playbackPeriodMS * playbackPeriods = 300 ms), with margin to spare.
+const drainTailDelay = 400 * time.Millisecond
 
 // ttsDefaultModel + ttsDefaultVoice mirror OpenAI's TTS defaults so a
 // blank-but-enabled config still produces audible output against OpenAI
@@ -117,76 +137,79 @@ func Synthesize(ctx context.Context, endpoint, apiKey, model, voice, text string
 	return audioBytes, nil
 }
 
-// sampleFormatFor returns the QAudioFormat sample-format for a given WAV
-// bit depth. WAV PCM can be 8-bit unsigned or N-bit signed for N ≥ 16 —
-// Qt's sample-format enum mirrors that asymmetry.
-func sampleFormatFor(bits int) (mm.QAudioFormat__SampleFormat, error) {
+// sampleFormatFor returns the miniaudio sample-format for a given WAV bit
+// depth. WAV PCM is 8-bit unsigned or N-bit signed for N ≥ 16 —
+// miniaudio's format enum mirrors that asymmetry.
+func sampleFormatFor(bits int) (malgo.FormatType, error) {
 	switch bits {
 	case 8:
-		return mm.QAudioFormat__UInt8, nil
+		return malgo.FormatU8, nil
 	case 16:
-		return mm.QAudioFormat__Int16, nil
+		return malgo.FormatS16, nil
 	case 32:
-		return mm.QAudioFormat__Int32, nil
+		return malgo.FormatS32, nil
 	}
-	return mm.QAudioFormat__Unknown, fmt.Errorf("unsupported bit depth: %d", bits)
+	return malgo.FormatUnknown, fmt.Errorf("unsupported bit depth: %d", bits)
 }
 
-// Speaker owns a single in-flight playback. The Go GC must not collect
-// any of these fields while the sink is still draining the buffer —
-// QAudioSink reads from buffer.QIODevice asynchronously, so all three
-// have to stay alive until cleanup() runs.
+// Speaker owns a single in-flight playback. The data callback streams pcm
+// out to the device on miniaudio's audio thread; mu guards the cursor and
+// teardown flags against the user's Stop arriving on another thread.
 type Speaker struct {
-	sink   *mm.QAudioSink
-	buffer *qt.QBuffer
-	format *mm.QAudioFormat
-	done   bool
+	device *malgo.Device
+
+	mu  sync.Mutex
+	pcm []byte // raw PCM, format described by the device config
+	pos int    // bytes already handed to the device
+
 	// OnDone, if set, fires exactly once when playback ends on its own
 	// (the buffer drained) — *not* when Stop cancels it early.
 	// Continuous-conversation mode hangs the next recording off this so
 	// the mic only reopens after Diesel has actually finished speaking.
 	OnDone func()
-	// naturalEnd records whether we passed through IdleState (buffer
-	// exhausted) before stopping. An explicit Stop jumps straight to
-	// StoppedState, so this stays false and OnDone is suppressed.
+	// naturalEnd records whether playback drained on its own. An explicit
+	// Stop leaves it false, suppressing OnDone.
 	naturalEnd bool
-	// span tracks the playback lifetime — started in Play after the
-	// WAV decode succeeds, ended in cleanup() with the natural_end flag.
+	// draining marks that the PCM has been fully emitted and the tail
+	// timer is running, so the callback only schedules teardown once.
+	draining bool
+	// finished guards finish() so the device is uninitialized and OnDone
+	// fires exactly once across the Stop and drain paths.
+	finished bool
+
+	// span tracks the playback lifetime — started in Play after the WAV
+	// decode succeeds, ended in finish() with the natural_end flag.
 	span      trace.Span
 	startedAt time.Time
 }
 
-// Play decodes a WAV blob and streams its PCM through QAudioSink using a
-// QBuffer as the pull-mode source device. Format selection comes from
-// the WAV header rather than being hardcoded: Speaches emits Kokoro at
-// 24 kHz, OpenAI's tts-1 at 24 kHz, Piper varies by voice — we just play
-// what the server gave us.
+// Play decodes a WAV blob and streams its PCM to a miniaudio playback
+// device, pulling samples from an in-memory cursor in the data callback.
+// Format selection comes from the WAV header rather than being hardcoded:
+// Speaches emits Kokoro at 24 kHz, OpenAI's tts-1 at 24 kHz, Piper varies
+// by voice — we just play what the server gave us.
 //
 // Returns a Speaker whose Stop cancels playback early; otherwise the
-// sink tears itself down when the buffer reaches IdleState (data
-// exhausted).
+// device tears itself down a short tail after the PCM is exhausted.
 func Play(ctx context.Context, audioBytes []byte) (*Speaker, error) {
 	_, span := tracing.StartSpan(ctx, "tts.play",
 		attribute.Int("tts.audio.bytes", len(audioBytes)),
 	)
-	if len(audioBytes) == 0 {
-		err := errors.New("no audio to play")
-		span.SetStatus(codes.Error, err.Error())
-		span.End()
-		return nil, err
-	}
-	info, err := wav.Parse(audioBytes)
-	if err != nil {
+	fail := func(err error) (*Speaker, error) {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		span.End()
-		return nil, fmt.Errorf("decode WAV: %w", err)
+		return nil, err
+	}
+	if len(audioBytes) == 0 {
+		return fail(errors.New("no audio to play"))
+	}
+	info, err := wav.Parse(audioBytes)
+	if err != nil {
+		return fail(fmt.Errorf("decode WAV: %w", err))
 	}
 	if info.SampleRate <= 0 || info.Channels <= 0 || len(info.PCM) == 0 {
-		err := errors.New("WAV header missing required fields")
-		span.SetStatus(codes.Error, err.Error())
-		span.End()
-		return nil, err
+		return fail(errors.New("WAV header missing required fields"))
 	}
 	span.SetAttributes(
 		attribute.Int("tts.play.sample_rate", info.SampleRate),
@@ -196,79 +219,107 @@ func Play(ctx context.Context, audioBytes []byte) (*Speaker, error) {
 	)
 	sampleFmt, err := sampleFormatFor(info.BitsPerSample)
 	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
-		span.End()
-		return nil, err
+		return fail(err)
 	}
 
-	format := mm.NewQAudioFormat()
-	format.SetSampleRate(info.SampleRate)
-	format.SetChannelCount(info.Channels)
-	format.SetSampleFormat(sampleFmt)
-
-	dev := audio.PickOutputDevice(settings.Load().OutputDevice)
-	if dev == nil {
-		err := errors.New("no audio output device available")
-		span.SetStatus(codes.Error, err.Error())
-		span.End()
-		return nil, err
+	mctx, err := audio.Context()
+	if err != nil {
+		return fail(fmt.Errorf("audio backend: %w", err))
 	}
 
-	buf := qt.NewQBuffer()
-	buf.SetData(info.PCM)
-	if !buf.Open(qt.QIODeviceBase__ReadOnly) {
-		err := errors.New("could not open audio buffer")
-		span.SetStatus(codes.Error, err.Error())
-		span.End()
-		return nil, err
+	cfg := malgo.DefaultDeviceConfig(malgo.Playback)
+	cfg.Playback.Format = sampleFmt
+	cfg.Playback.Channels = uint32(info.Channels)
+	cfg.SampleRate = uint32(info.SampleRate)
+	// Buffer generously so a Go-side pause can't starve the device mid-
+	// utterance — see playbackPeriodMS. Latency is irrelevant here.
+	cfg.PeriodSizeInMilliseconds = playbackPeriodMS
+	cfg.Periods = playbackPeriods
+	cfg.PerformanceProfile = malgo.Conservative
+	// devID is read synchronously by ma_device_init below; nil = default.
+	devID, err := audio.PickOutputDevice(settings.Load().OutputDevice)
+	if err != nil {
+		return fail(fmt.Errorf("resolve output device: %w", err))
+	}
+	if devID != nil {
+		cfg.Playback.DeviceID = unsafe.Pointer(devID)
 	}
 
-	sink := mm.NewQAudioSink5(dev, format)
-	s := &Speaker{sink: sink, buffer: buf, format: format, span: span, startedAt: time.Now()}
-	// QAudioSink's state machine has a subtlety: when the source device
-	// returns 0 bytes (buffer drained) the sink transitions to
-	// IdleState but stays "active" and keeps polling for more data. If
-	// we close the buffer here Qt logs "QIODevice::read (QBuffer):
-	// device not open" on every pull cycle until the sink is GC'd.
-	// The fix is to call Stop() on Idle so the sink transitions to
-	// StoppedState — only then is it safe to close the buffer.
-	sink.OnStateChanged(func(state mm.QAudio__State) {
-		switch state {
-		case mm.QAudio__IdleState:
-			s.naturalEnd = true
-			s.sink.Stop() // → StoppedState
-		case mm.QAudio__StoppedState:
-			s.cleanup()
-		}
-	})
-	sink.Start(buf.QIODevice)
+	// info.PCM aliases the input buffer (see wav.Info); copy it so the
+	// Speaker can outlive audioBytes while the callback streams from it.
+	s := &Speaker{
+		pcm:       append([]byte(nil), info.PCM...),
+		span:      span,
+		startedAt: time.Now(),
+	}
+	dev, err := malgo.InitDevice(mctx, cfg, malgo.DeviceCallbacks{Data: s.read})
+	if err != nil {
+		return fail(fmt.Errorf("open audio output: %w", err))
+	}
+	s.device = dev
+	if err := dev.Start(); err != nil {
+		dev.Uninit()
+		return fail(fmt.Errorf("start audio output: %w", err))
+	}
 	return s, nil
 }
 
-// Stop halts playback immediately. Safe to call from anywhere on the Qt
-// main thread, including before play has actually started or after it
-// already finished — cleanup is idempotent and runs from the state
-// change the Stop() call triggers.
-func (s *Speaker) Stop() {
-	if s == nil || s.done {
-		return
+// read fills the device's output buffer from the PCM cursor, zero-filling
+// any remainder once the data runs out and arming the tail timer the first
+// time that happens. Runs on miniaudio's audio thread.
+func (s *Speaker) read(out, _ []byte, _ uint32) {
+	s.mu.Lock()
+	n := copy(out, s.pcm[s.pos:])
+	s.pos += n
+	if n < len(out) {
+		for i := n; i < len(out); i++ {
+			out[i] = 0
+		}
+		if s.pos >= len(s.pcm) && !s.draining && !s.finished {
+			s.draining = true
+			go s.drainThenFinish()
+		}
 	}
-	if s.sink != nil {
-		s.sink.Stop() // → StoppedState → cleanup() via the signal
-	}
+	s.mu.Unlock()
 }
 
-// cleanup runs once the sink reaches Idle or Stopped. Closes the buffer
-// (which signals "no more data" to Qt) and marks the speaker done so a
-// follow-up Stop is a no-op.
-func (s *Speaker) cleanup() {
-	if s.done {
+// drainThenFinish waits out the backend's tail buffer after the PCM is
+// exhausted, then finishes as a natural end (firing OnDone).
+func (s *Speaker) drainThenFinish() {
+	time.Sleep(drainTailDelay)
+	s.finish(true)
+}
+
+// Stop halts playback immediately. Safe to call from any goroutine,
+// including before play has started or after it already finished — finish
+// is idempotent and suppresses OnDone on this (non-natural) path.
+func (s *Speaker) Stop() {
+	if s == nil {
 		return
 	}
-	s.done = true
-	if s.buffer != nil {
-		s.buffer.Close()
+	s.finish(false)
+}
+
+// finish uninitializes the device and, on a natural end, fires OnDone —
+// exactly once. ma_device_uninit must not run on the audio thread (it
+// blocks on the callback returning), so finish is only ever called from
+// the drain goroutine or an external Stop, never from read.
+func (s *Speaker) finish(natural bool) {
+	s.mu.Lock()
+	if s.finished {
+		s.mu.Unlock()
+		return
+	}
+	s.finished = true
+	if natural {
+		s.naturalEnd = true
+	}
+	fireOnDone := s.naturalEnd && s.OnDone != nil
+	onDone := s.OnDone
+	s.mu.Unlock()
+
+	if s.device != nil {
+		s.device.Uninit()
 	}
 	if s.span != nil {
 		s.span.SetAttributes(
@@ -277,10 +328,7 @@ func (s *Speaker) cleanup() {
 		)
 		s.span.End()
 	}
-	// Only chain onward when playback drained on its own — an explicit
-	// Stop (user reached for the mic, or a newer reply replaced this
-	// one) means the continuous loop should not fire here.
-	if s.naturalEnd && s.OnDone != nil {
-		s.OnDone()
+	if fireOnDone {
+		onDone()
 	}
 }
