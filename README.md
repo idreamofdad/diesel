@@ -19,7 +19,57 @@ Each conversation turn fans out across four independent backends:
 - **Text-to-speech** — the reply text is sent to an OpenAI-compatible `/v1/audio/speech` endpoint and streamed to the output device. Starting a new recording interrupts in-flight playback so the VAD doesn't pick up Diesel talking over the user.
 - **Image generation** — a ComfyUI server driven over its WebSocket API using a bundled workflow (`default_workflow.json`). The reply's emotion and nudity flag are spliced into the prompt; preview frames stream into the portrait pane during diffusion, with the final PNG cached for the full-size viewer.
 
-Settings and conversation history are persisted as JSON under the OS user config directory.
+Settings and conversation history are persisted in a SQLite database under the OS user config directory (`%APPDATA%\diesel\` on Windows, `~/Library/Application Support/diesel/` on macOS, `~/.config/diesel/` on Linux).
+
+## Building
+
+### Prerequisites
+
+- Go 1.22+
+- Node 20+ / npm (for the embedded web UI)
+- A C compiler for CGo (required by the audio and GUI layers):
+  - **Windows**: [TDM-GCC-64](https://jmeubank.github.io/tdm-gcc/) or MinGW-w64
+  - **macOS**: Xcode Command Line Tools (`xcode-select --install`)
+  - **Linux**: `gcc` from your distro's package manager
+
+### Windows
+
+```powershell
+# Build the web frontend (first time, or after web/ changes)
+.\build.ps1 generate
+
+# Run the app
+.\build.ps1 run
+
+# Build all packages (verify it compiles)
+.\build.ps1 build
+
+# Other targets: test, vet, lint, voicecheck
+.\build.ps1 test
+```
+
+### macOS / Linux
+
+```bash
+make build   # build all packages
+make test    # run tests
+make vet     # go vet
+
+# Run the app
+go run -tags goolm ./cmd/diesel
+```
+
+### Release builds (GoReleaser)
+
+```bash
+# Snapshot (no tag required)
+goreleaser release --snapshot --clean
+
+# Tagged release
+git tag v0.1.0 && goreleaser release --clean
+```
+
+GoReleaser produces a `diesel_<version>_windows_amd64.zip` (plain `.exe`) and a `diesel_<version>_macos_arm64.zip` (self-contained `.app` bundle).
 
 ## The shared hub
 

@@ -1,9 +1,8 @@
-# GoReleaser config for diesel — builds a self-contained macOS .app bundle.
+# GoReleaser config for diesel.
 #
-# The Go binary is compiled with cgo against the Homebrew Qt6 frameworks, then
-# `macdeployqt` is run to copy QtCore/QtGui/QtWidgets + the cocoa platform
-# plugin into the bundle and rewrite the install names. The shipped .app
-# therefore runs on machines that do not have Qt installed.
+# Builds:
+#   - macOS  : self-contained .app bundle (darwin/arm64)
+#   - Windows: plain .zip containing diesel.exe (windows/amd64)
 #
 # Snapshot build (no git tag needed):
 #   goreleaser release --snapshot --clean
@@ -11,11 +10,8 @@
 #   git tag v0.1.0 && goreleaser release --clean
 #
 # Requirements on the build host:
-#   - Homebrew qt   (`brew install qt`)            — provides headers & macdeployqt
-#   - Go 1.22+      with cgo enabled
-#   - Xcode CLT     (`xcode-select --install`)     — clang for C++17
-#   - Node 20+ / npm                                — to build the embedded web UI
-#                                                     (`go generate ./...` runs Vite)
+#   macOS  : Homebrew qt (brew install qt), Xcode CLT, Node 20+/npm
+#   Windows: TDM-GCC-64 or MinGW-w64 (for CGo), Node 20+/npm
 
 version: 2
 
@@ -24,48 +20,53 @@ project_name: diesel
 before:
   hooks:
     - go mod tidy
-    # Fail fast if any of the prerequisite tools are missing instead of
-    # producing a broken .app. macdeployqt comes with Homebrew Qt; npm
-    # is required by the `go generate` step below.
-    - sh -c 'command -v macdeployqt >/dev/null || { echo "macdeployqt not found — brew install qt" >&2; exit 1; }'
+    # Fail fast if npm is missing — required by go generate to build the Svelte frontend.
     - sh -c 'command -v npm >/dev/null || { echo "npm not found — install Node 20+ before building" >&2; exit 1; }'
-    # Build the Svelte frontend into web/dist so //go:embed picks it
-    # up. `go generate` invokes Vite (see web/embed.go's directive).
-    # Runs before the Go build so the binary always ships with the
-    # current SPA — never falls through to the stub HTML.
+    # Build the Svelte frontend into web/dist so //go:embed picks it up.
     - go generate ./...
 
 builds:
-  - id: diesel
+  # ── macOS .app bundle ────────────────────────────────────────────────────────
+  - id: diesel-macos
     main: ./cmd/diesel
-    # Build the Mach-O directly inside the .app skeleton so the archive step
-    # naturally captures it at the right path.
+    # Binary placed inside the .app skeleton so the archive step captures it.
     binary: diesel.app/Contents/MacOS/diesel
     env:
       - CGO_ENABLED=1
-      - CGO_CXXFLAGS=-std=c++17
     goos: [darwin]
-    # Restricted to the host arch: Homebrew's Qt is single-arch, so cross-arch
-    # cgo linking would fail. Add amd64 here only if you also have an
-    # amd64-built Qt available and PKG_CONFIG_PATH points at it.
+    # Restricted to arm64: Homebrew's Qt is single-arch.
     goarch: [arm64]
     flags:
       - -trimpath
+      - -tags goolm
     ldflags:
       - -s -w
     hooks:
+      pre:
+        # Fail fast if macdeployqt is missing — required to bundle Qt frameworks.
+        - sh -c 'command -v macdeployqt >/dev/null || { echo "macdeployqt not found — brew install qt" >&2; exit 1; }'
       post:
-        # {{ .Path }} = dist/diesel_darwin_arm64*/diesel.app/Contents/MacOS/diesel
         - cmd: bash scripts/macos-bundle.sh "{{ .Path }}"
+
+  # ── Windows .exe ─────────────────────────────────────────────────────────────
+  - id: diesel-windows
+    main: ./cmd/diesel
+    binary: diesel
+    env:
+      - CGO_ENABLED=1
+    goos: [windows]
+    goarch: [amd64]
+    flags:
+      - -trimpath
+      - -tags goolm
+    ldflags:
+      - -s -w
 
 archives:
   - id: macos
-    builds: [diesel]
+    builds: [diesel-macos]
     formats: [zip]
     name_template: "{{ .ProjectName }}_{{ .Version }}_macos_{{ .Arch }}"
-    # The binary is already included at diesel.app/Contents/MacOS/diesel via
-    # the build's `binary:` path. These entries pull in everything the
-    # post-build hook produced alongside it.
     files:
       - src: dist/diesel_darwin_*/diesel.app/Contents/Info.plist
         dst: diesel.app/Contents/Info.plist
@@ -75,6 +76,11 @@ archives:
         dst: diesel.app/Contents/PlugIns
       - src: dist/diesel_darwin_*/diesel.app/Contents/Resources
         dst: diesel.app/Contents/Resources
+
+  - id: windows
+    builds: [diesel-windows]
+    formats: [zip]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_windows_{{ .Arch }}"
 
 checksum:
   name_template: 'checksums.txt'
