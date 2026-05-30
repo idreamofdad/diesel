@@ -18,7 +18,7 @@ const ImageQualityPrefix = `masterpiece, best quality, very aesthetic, absurdres
 // handing it to Generate, then appends an emotion fragment from
 // EmotionPrompts. The background tag is sourced from ImageBackgrounds
 // per turn — kept out of here so the scene can swap with the chat.
-const ImagePrompt = `1boy, solo, dubusi, ochman, fat man, hairy, braided beard, mustache, short green hair, green eyes`
+const ImagePrompt = `1boy, solo, dubusi, ochman, fat man, hairy, (braided beard), mustache, short green hair, green eyes, beard braid`
 
 // ImageClothing is appended to ImagePrompt when the structured reply's
 // Naked flag is false. Kept separate so the splice can swap it for
@@ -35,7 +35,7 @@ const ImageNudity = `naked, small penis, flaccid, uncut, uncircumcised, foreskin
 // reject feminine tags) with the Illustrious quality-failure baseline
 // (lo-res, deformed anatomy, watermarks, etc.). Read directly by
 // Generate.
-const ImageNegativePrompt = `woman, girl, shirt logo, feminine, wide hips, worst quality, low quality, lowres, bad anatomy, bad hands, extra fingers, deformed, blurry, watermark, signature, text, jpeg artifacts, ponytail`
+const ImageNegativePrompt = `woman, girl, shirt logo, feminine, wide hips, worst quality, low quality, lowres, bad anatomy, bad hands, extra fingers, deformed, blurry, watermark, signature, text, jpeg artifacts, (ponytail)`
 
 // SceneSpec pairs a human-readable label with the tag list that ends up
 // in the prompt. Label is used for continuity reminders fed back to the
