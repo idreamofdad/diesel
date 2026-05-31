@@ -17,5 +17,8 @@
   },
   "dependencies": {
     "@ricky0123/vad-web": "^0.0.24"
+  },
+  "optionalDependencies": {
+    "@rollup/rollup-win32-x64-msvc": "^4.60.4"
   }
 }
