@@ -11,6 +11,7 @@ import (
 
 	"diesel/internal/audio"
 	"diesel/internal/comfyui"
+	"diesel/internal/knowledge"
 	"diesel/internal/matrix"
 	"diesel/internal/server"
 	"diesel/internal/settings"
@@ -107,7 +108,7 @@ func makeTestRow(label string) (fyne.CanvasObject, *widget.Button, *widget.Label
 // persisted settings. Save writes them back and re-applies the server/SMS/
 // Telegram/Matrix configs to their managers; Cancel discards. onClosed runs
 // after the dialog closes either way (the caller re-evaluates the Send gate).
-func showSettingsDialog(win fyne.Window, srvMgr *server.Manager, smsMgr *sms.Manager, tgMgr *telegram.Manager, mxMgr *matrix.Manager, onClosed func()) {
+func showSettingsDialog(win fyne.Window, srvMgr *server.Manager, smsMgr *sms.Manager, tgMgr *telegram.Manager, mxMgr *matrix.Manager, knMgr *knowledge.Service, onClosed func()) {
 	current := settings.Load()
 
 	// ─── LLM ───────────────────────────────────────────────────────────────
@@ -237,6 +238,18 @@ func showSettingsDialog(win fyne.Window, srvMgr *server.Manager, smsMgr *sms.Man
 	mxAllowed.SetPlaceHolder("@you:matrix.org — the one allowed user")
 	mxStatus := widget.NewLabel(mxMgr.Status())
 	mxStatus.Wrapping = fyne.TextWrapWord
+
+	// ─── Knowledge graph ───────────────────────────────────────────────────
+	enableKnowledge := widget.NewCheck("Enable persistent memory (knowledge graph)", nil)
+	enableKnowledge.SetChecked(current.EnableKnowledge)
+	knEnableHTTP := widget.NewCheck("Expose an MCP server for external clients (loopback only)", nil)
+	knEnableHTTP.SetChecked(current.KnowledgeMCPEnableHTTP)
+	knPort := newIntEntry(current.KnowledgeMCPPort, 1, 65535)
+	knToken := widget.NewPasswordEntry()
+	knToken.SetText(current.KnowledgeMCPAuthToken)
+	knToken.SetPlaceHolder("(required to enable the MCP listener)")
+	knStatus := widget.NewLabel(knMgr.Status())
+	knStatus.Wrapping = fyne.TextWrapWord
 
 	// ─── Appearance ────────────────────────────────────────────────────────
 	themeSel := widget.NewSelect([]string{"System", "Dark", "Light"}, nil)
@@ -531,6 +544,13 @@ func showSettingsDialog(win fyne.Window, srvMgr *server.Manager, smsMgr *sms.Man
 		widget.NewFormItem("Status", mxStatus),
 		full(mxTestRow),
 	)
+	knTab := tab(
+		full(enableKnowledge),
+		full(knEnableHTTP),
+		widget.NewFormItem("MCP port", knPort),
+		widget.NewFormItem("MCP auth token", knToken),
+		widget.NewFormItem("Status", knStatus),
+	)
 	apTab := tab(
 		widget.NewFormItem("Theme", themeSel),
 		full(autoSave),
@@ -545,6 +565,7 @@ func showSettingsDialog(win fyne.Window, srvMgr *server.Manager, smsMgr *sms.Man
 		container.NewTabItem("SMS", smsTab),
 		container.NewTabItem("Telegram", tgTab),
 		container.NewTabItem("Matrix", mxTab),
+		container.NewTabItem("Knowledge", knTab),
 		container.NewTabItem("Appearance", apTab),
 	)
 
@@ -611,6 +632,10 @@ func showSettingsDialog(win fyne.Window, srvMgr *server.Manager, smsMgr *sms.Man
 			MatrixBotUserID:         strings.TrimSpace(mxBotID.Text),
 			MatrixPassword:          mxPassword.Text,
 			MatrixAllowedUser:       strings.TrimSpace(mxAllowed.Text),
+			EnableKnowledge:         enableKnowledge.Checked,
+			KnowledgeMCPEnableHTTP:  knEnableHTTP.Checked,
+			KnowledgeMCPPort:        intOr(knPort, current.KnowledgeMCPPort),
+			KnowledgeMCPAuthToken:   strings.TrimSpace(knToken.Text),
 		}
 		if err := updated.Save(); err != nil {
 			dialog.ShowError(fmt.Errorf("could not save settings: %w", err), win)
@@ -622,11 +647,13 @@ func showSettingsDialog(win fyne.Window, srvMgr *server.Manager, smsMgr *sms.Man
 		smsStatus.SetText(smsMgr.Apply(updated))
 		tgStatus.SetText(tgMgr.Apply(updated))
 		mxStatus.SetText(mxMgr.Apply(updated))
+		knStatus.SetText(knMgr.Apply(updated))
 		// If any apply failed, keep the dialog open so the user can fix it.
 		if strings.HasPrefix(serverStatus.Text, "✗") ||
 			strings.HasPrefix(smsStatus.Text, "✗") ||
 			strings.HasPrefix(tgStatus.Text, "✗") ||
-			strings.HasPrefix(mxStatus.Text, "✗") {
+			strings.HasPrefix(mxStatus.Text, "✗") ||
+			strings.HasPrefix(knStatus.Text, "✗") {
 			return
 		}
 		d.Hide()

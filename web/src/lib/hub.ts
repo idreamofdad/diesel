@@ -21,6 +21,7 @@ export type EventType =
   | 'portrait_progress'
   | 'turn_error'
   | 'status'
+  | 'llm_activity'
   | 'cleared'
   | 'busy'
   | 'ack';
@@ -52,6 +53,8 @@ export interface HubEvent {
   step?: number;
   total?: number;
   timestamp?: string;
+  // llm_activity (and ack/state seed)
+  llm_active?: boolean;
   // ack-only fields
   client_id?: string;
   in_flight?: boolean;
@@ -92,6 +95,9 @@ export const inFlight: Writable<boolean> = writable(false);
 export const portraitURL: Writable<string> = writable('');
 export const connected: Writable<boolean> = writable(false);
 export const usage: Writable<Usage> = writable({});
+// llmActive is true while any model call is running — the reply and/or the
+// background memory pass — so the UI can show a single "thinking" indicator.
+export const llmActive: Writable<boolean> = writable(false);
 // identityConfigured mirrors the Go-side AppSettings.IdentityConfigured()
 // — true iff first/last/pet name are all non-empty after trim. Populated
 // by fetchSettings on app load and refreshed by saveSettings on dialog
@@ -129,6 +135,7 @@ export async function connect(): Promise<void> {
       history.set(data.history || []);
       statusText.set(data.status || 'Ready');
       inFlight.set(!!data.in_flight);
+      llmActive.set(!!data.llm_active);
       if (data.portrait_url) portraitURL.set(data.portrait_url);
     } else if (resp.status === 401) {
       statusText.set('✗ Unauthorized — set your token in Settings');
@@ -184,7 +191,11 @@ function handleEvent(ev: HubEvent) {
     case 'ack':
       if (ev.status) statusText.set(ev.status);
       if (typeof ev.in_flight === 'boolean') inFlight.set(ev.in_flight);
+      if (typeof ev.llm_active === 'boolean') llmActive.set(ev.llm_active);
       if (ev.portrait_url) portraitURL.set(ev.portrait_url);
+      break;
+    case 'llm_activity':
+      llmActive.set(!!ev.llm_active);
       break;
     case 'turn_started':
       inFlight.set(true);
@@ -417,4 +428,90 @@ export async function testTTS(body: ProbeBody): Promise<Blob> {
     throw new Error(data.error || 'TTS failed');
   }
   return resp.blob();
+}
+
+// ─── Knowledge graph API ───────────────────────────────────────────────
+// Thin wrappers over the /api/v1/knowledge routes — the same graph the
+// companion model edits via its MCP tools. Field names mirror the Go
+// knowledge package's JSON tags (internal/knowledge/graph.go). Mutating
+// calls throw with the server's message on failure so the editor can show
+// domain errors verbatim (e.g. "entity does not exist; create it first").
+
+export interface KGEntity {
+  name: string;
+  entityType: string;
+  observations: string[];
+}
+
+export interface KGRelation {
+  from: string;
+  to: string;
+  relationType: string;
+}
+
+export interface KnowledgeGraph {
+  entities: KGEntity[];
+  relations: KGRelation[];
+}
+
+async function knowledgePost(path: string, body: unknown): Promise<any> {
+  const resp = await fetch(path, {
+    method: 'POST',
+    headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!resp.ok) {
+    let msg = `HTTP ${resp.status}`;
+    try {
+      const data = await resp.json();
+      if (data.error) msg = data.error;
+    } catch {
+      /* non-JSON body — keep the status message */
+    }
+    throw new Error(msg);
+  }
+  return resp.json();
+}
+
+export async function fetchGraph(): Promise<KnowledgeGraph> {
+  const resp = await fetch('/api/v1/knowledge', { headers: authHeaders() });
+  if (resp.status === 501) throw new Error('Knowledge graph is not available on this server.');
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  const g: KnowledgeGraph = await resp.json();
+  // The Go side guarantees non-null slices, but be defensive for older builds.
+  g.entities ??= [];
+  g.relations ??= [];
+  return g;
+}
+
+export async function createEntity(name: string, entityType: string): Promise<void> {
+  await knowledgePost('/api/v1/knowledge/entities', {
+    entities: [{ name, entityType, observations: [] }],
+  });
+}
+
+export async function deleteEntity(name: string): Promise<void> {
+  await knowledgePost('/api/v1/knowledge/entities/delete', { names: [name] });
+}
+
+export async function addObservation(entityName: string, content: string): Promise<void> {
+  await knowledgePost('/api/v1/knowledge/observations', {
+    observations: [{ entityName, contents: [content] }],
+  });
+}
+
+export async function deleteObservation(entityName: string, content: string): Promise<void> {
+  await knowledgePost('/api/v1/knowledge/observations/delete', {
+    deletions: [{ entityName, contents: [content] }],
+  });
+}
+
+export async function createRelation(from: string, to: string, relationType: string): Promise<void> {
+  await knowledgePost('/api/v1/knowledge/relations', {
+    relations: [{ from, to, relationType }],
+  });
+}
+
+export async function deleteRelation(rel: KGRelation): Promise<void> {
+  await knowledgePost('/api/v1/knowledge/relations/delete', { relations: [rel] });
 }

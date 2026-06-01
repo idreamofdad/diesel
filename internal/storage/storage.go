@@ -39,8 +39,11 @@ func Open(path string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("storage: create dir: %w", err)
 	}
-	// modernc takes pragmas as repeated _pragma query params.
-	dsn := "file:" + path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)"
+	// modernc takes pragmas as repeated _pragma query params. foreign_keys
+	// is off by default in SQLite and is a per-connection setting, so it has
+	// to ride on the DSN to apply to every pooled connection — the knowledge
+	// graph's ON DELETE CASCADE rules are silently inert without it.
+	dsn := "file:" + path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("storage: open: %w", err)

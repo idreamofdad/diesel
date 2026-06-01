@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"regexp"
 	"strings"
@@ -17,6 +18,7 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // Chat message roles, matching the OpenAI-compatible /chat/completions
@@ -25,7 +27,23 @@ const (
 	RoleSystem    = "system"
 	RoleUser      = "user"
 	RoleAssistant = "assistant"
+	// RoleTool labels a message carrying a tool's result back to the model,
+	// keyed to the assistant's tool_call by ToolCallID. Only used on the
+	// knowledge-graph tool-calling path.
+	RoleTool = "tool"
 )
+
+// maxToolIterations bounds how many rounds of tool calls a single turn may
+// make before we force a final answer. A confused model that keeps calling
+// tools can't loop forever or rack up unbounded latency; after this many
+// rounds we ask once more with no tools and a strict schema.
+const maxToolIterations = 5
+
+// knowledgeTokenWarn is the rough token size of the injected graph blob past
+// which we log a warning. The graph is persistent memory and only grows, so
+// this is an early smoke alarm for "the system prompt is getting big" — not a
+// truncation point (we still inject the whole thing).
+const knowledgeTokenWarn = 6000
 
 // Message is the wire shape for an OpenAI-compatible /chat/completions
 // turn. We also keep a slice of these in memory (and on disk) as the
@@ -176,21 +194,54 @@ func lastPose(history []Message) string {
 	return ""
 }
 
-// Completion sends `history` (oldest→newest) to the configured endpoint
-// and returns the assistant's structured reply along with the server-
-// reported token usage (zero-valued struct when the server didn't include
-// one). Reasoning/"thinking" is explicitly disabled via every shape we
-// know of — extra fields a server doesn't understand are ignored by
-// OpenAI-compatible implementations.
+// wireMsg is the request-side shape of a /chat/completions message. It's a
+// superset of the plain role/content pair: ToolCalls rides on an assistant
+// turn that wants to call tools, and ToolCallID labels a RoleTool message
+// carrying a tool's result back. Kept separate from Message (the history /
+// persisted type) so the tool-calling machinery never leaks into the
+// conversation log — tool turns are transient request scaffolding, not
+// transcript.
+type wireMsg struct {
+	Role       string     `json:"role"`
+	Content    string     `json:"content,omitempty"`
+	ToolCalls  []toolCall `json:"tool_calls,omitempty"`
+	ToolCallID string     `json:"tool_call_id,omitempty"`
+}
+
+// toolCall mirrors the OpenAI tool_call object: an id the tool result must
+// echo back, a type (always "function"), and the function name + raw JSON
+// argument string the model produced.
+type toolCall struct {
+	ID       string `json:"id"`
+	Type     string `json:"type"`
+	Function struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	} `json:"function"`
+}
+
+// Completion sends `history` (oldest→newest) to the configured endpoint and
+// returns the assistant's structured reply with the server-reported token
+// usage (zero-valued when the server omits it).
 //
-// The request asks for a strict JSON schema (Reply); LM Studio and OpenAI
-// honor it. Providers that ignore response_format will return plain text,
-// which we treat as the whole `text` with a neutral emotion so the
-// conversation keeps flowing rather than erroring out.
-func Completion(ctx context.Context, s settings.AppSettings, history []Message) (Reply, Usage, error) {
+// When kb is non-nil, Diesel's persistent memory is in play: the whole
+// knowledge graph is injected into the system prompt as JSON, and the graph's
+// MCP tools are advertised so the model can update its memory mid-turn. The
+// model runs through a tool-call loop and then produces the strict Reply
+// schema. When no KnowledgeBase is supplied (or a nil one), this is a single
+// structured-output call with reasoning disabled — the original, tool-free
+// behavior — so existing callers and tests are unaffected. The trailing
+// parameter is optional purely so those call sites stay terse; callers pass at
+// most one.
+func Completion(ctx context.Context, s settings.AppSettings, history []Message, kbs ...KnowledgeBase) (Reply, Usage, error) {
+	var kb KnowledgeBase
+	if len(kbs) > 0 {
+		kb = kbs[0]
+	}
 	ctx, span := tracing.StartSpan(ctx, "llm.chat",
 		attribute.String("llm.model", s.Model),
 		attribute.Int("llm.history.messages", len(history)),
+		attribute.Bool("llm.knowledge", kb != nil),
 	)
 	defer span.End()
 
@@ -206,61 +257,232 @@ func Completion(ctx context.Context, s settings.AppSettings, history []Message) 
 		return Reply{}, Usage{}, err
 	}
 
-	// Assemble the outgoing message list: optional system prompt, then the
-	// trailing window of history capped at HistoryMessages turns. The
-	// caller has already appended the latest user message to `history`.
-	msgs := make([]Message, 0, len(history)+2)
-	msgs = append(msgs, Message{
+	// Reply path: graph injected for reading (when kb is set), strict schema,
+	// reasoning disabled, NO tools. Keeping tools off the reply request is what
+	// makes this robust — combining tools with a strict response_format makes
+	// many local models either 400 or silently refuse to ever call a tool.
+	// Memory writes happen separately in MemoryPass, after the reply is sent.
+	msgs := assembleMessages(ctx, s, history, kb)
+	choice, usage, _, err := callLLM(ctx, s, endpoint, buildBody(s.Model, msgs, nil, true, true))
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return Reply{}, usage, err
+	}
+	recordUsage(span, usage)
+	return finalizeReply(choice.Content, history, span), usage, nil
+}
+
+// memoryInstruction steers the second-pass model: look at the conversation it
+// just had and record anything durable through the write tools. It's appended
+// as the final system message of the memory pass, after the persona + graph +
+// history that assembleMessages already laid down. It's deliberately concrete
+// and example-driven — small local models follow a worked example far more
+// reliably than abstract rules.
+const memoryInstruction = `# Updating your memory
+
+You are now updating your own long-term memory based on the conversation above. This is a background step — do NOT write a chat reply, only call tools.
+
+Your memory is a knowledge graph of three things:
+- ENTITIES — the people, animals, places, and things you know. Each has a unique name and a type (e.g. name "Tyr Mactire", type "person"; name "Beckett", type "cat").
+- OBSERVATIONS — short factual notes attached to one entity (e.g. on "Tyr Mactire": "works at McDonalds").
+- RELATIONS — directed links between two entities, written in active voice (e.g. "Tyr Mactire" —owns→ "Beckett").
+
+You have these tools:
+- create_entities — add new entities. Pass each as {name, entityType, observations:[]}. Re-using a name just merges in new observations, so it's safe.
+- add_observations — attach new facts to an entity that already exists. Pass {entityName, contents:[...]}.
+- create_relations — link two entities that BOTH already exist. Pass {from, to, relationType}. If an endpoint doesn't exist yet, create it first or the call is rejected.
+- delete_entities / delete_observations / delete_relations — remove things that are now wrong or contradicted.
+
+Worked example — if the user said "I'm Tyr Mactire, I work at McDonalds, and I have a cat named Beckett", you would call:
+1. create_entities: [{name:"Tyr Mactire", entityType:"person", observations:["works at McDonalds"]}, {name:"Beckett", entityType:"cat", observations:[]}]
+2. create_relations: [{from:"Tyr Mactire", to:"Beckett", relationType:"owns"}]
+
+Rules:
+- Only record DURABLE facts (names, jobs, relationships, pets, where someone lives, lasting preferences). Ignore small talk and passing moods.
+- Check the graph above first — don't re-create entities or re-add observations that are already there.
+- Create entities before relating them.
+- If a new fact contradicts an old one, delete the stale piece and add the correct one.
+- If nothing new and durable came up, call no tools at all.`
+
+// MemoryPass is the second pass of the turn: after the user already has their
+// reply, the model gets the conversation plus its current memory and a set of
+// write-only tools, and records anything durable it learned. It is tools-only
+// (no response_format), so the tools+schema incompatibility never arises — the
+// model is free to call tools with nothing competing for the output. Runs to a
+// natural stop (the model emits no more tool calls) or the iteration cap.
+// Best-effort: any error is returned for logging but doesn't affect the reply,
+// which has already been delivered. A nil kb or empty tool set is a no-op.
+func MemoryPass(ctx context.Context, s settings.AppSettings, history []Message, kb KnowledgeBase) error {
+	if kb == nil {
+		return nil
+	}
+	ctx, span := tracing.StartSpan(ctx, "llm.memory",
+		attribute.String("llm.model", s.Model),
+	)
+	defer span.End()
+
+	endpoint := util.NormalizeEndpoint(s.APIEndpoint)
+	if endpoint == "" || strings.TrimSpace(s.Model) == "" {
+		return fmt.Errorf("memory: no endpoint or model configured")
+	}
+
+	defs, err := kb.Tools(ctx)
+	if err != nil {
+		return fmt.Errorf("memory: list tools: %w", err)
+	}
+	tools := toolsToWire(defs)
+	if len(tools) == 0 {
+		log.Printf("[chat] DEBUG memory pass: no write tools advertised, skipping")
+		return nil
+	}
+
+	msgs := memoryMessages(ctx, s, history, kb)
+
+	rounds := 0
+	for iter := 0; iter < maxToolIterations; iter++ {
+		// Tools-only, no schema, reasoning DISABLED. A thinking model left to
+		// reason here tends to spend the turn emitting a <think> block and
+		// return no tool calls at all; with thinking off it goes straight to
+		// calling the write tools, which the worked example primes it for.
+		body := buildBody(s.Model, msgs, tools, false, true)
+		log.Printf("[chat] DEBUG memory round %d request: tools=%d messages=%d", iter, len(tools), len(msgs))
+		choice, _, status, err := callLLM(ctx, s, endpoint, body)
+		if err != nil {
+			log.Printf("[chat] DEBUG memory round %d error: status=%d err=%v", iter, status, err)
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+			return err
+		}
+		log.Printf("[chat] DEBUG memory round %d response: toolCalls=%d content=%q", iter, len(choice.ToolCalls), truncate(choice.Content, 400))
+		if len(choice.ToolCalls) == 0 {
+			log.Printf("[chat] DEBUG memory pass complete after %d round(s) of tool calls", rounds)
+			span.SetAttributes(attribute.Int("llm.memory.rounds", rounds))
+			return nil
+		}
+		rounds++
+		msgs = append(msgs, wireMsg{Role: RoleAssistant, Content: choice.Content, ToolCalls: choice.ToolCalls})
+		for _, tc := range choice.ToolCalls {
+			log.Printf("[chat] DEBUG memory → tool call %q args=%s", tc.Function.Name, truncate(tc.Function.Arguments, 300))
+			result, callErr := kb.Call(ctx, tc.Function.Name, json.RawMessage(tc.Function.Arguments))
+			if callErr != nil {
+				log.Printf("[chat] DEBUG memory ← tool %q TRANSPORT ERROR: %v", tc.Function.Name, callErr)
+				result = "Error: " + callErr.Error()
+			} else {
+				log.Printf("[chat] DEBUG memory ← tool %q result=%s", tc.Function.Name, truncate(result, 300))
+			}
+			msgs = append(msgs, wireMsg{Role: RoleTool, ToolCallID: tc.ID, Content: result})
+		}
+	}
+	log.Printf("[chat] DEBUG memory pass hit the %d-round cap", maxToolIterations)
+	span.SetAttributes(attribute.Int("llm.memory.rounds", rounds))
+	return nil
+}
+
+// memoryMessages builds the focused prompt for the memory pass. It deliberately
+// does NOT reuse the reply assembly: the full Diesel persona ("you are Diesel,
+// reply in 1–3 sentences, never break character") fights the extraction task
+// and pushes a small model into producing an in-character chat reply instead of
+// tool calls. Here the model sees only its current memory, a plain transcript
+// of the recent exchange, and the how-to instruction — nothing telling it to
+// converse.
+func memoryMessages(ctx context.Context, s settings.AppSettings, history []Message, kb KnowledgeBase) []wireMsg {
+	msgs := make([]wireMsg, 0, 3)
+
+	if graph, err := kb.GraphJSON(ctx); err == nil && graph != "" {
+		msgs = append(msgs, wireMsg{
+			Role:    RoleSystem,
+			Content: "Your current memory, as a knowledge graph in JSON:\n\n" + graph,
+		})
+	}
+
+	// Render the recent turns as a plain transcript so the model treats them as
+	// material to extract from, not a conversation to continue.
+	start := 0
+	if n := s.HistoryMessages; n > 0 && len(history) > n {
+		start = len(history) - n
+	}
+	var b strings.Builder
+	for _, m := range history[start:] {
+		switch m.Role {
+		case RoleUser:
+			b.WriteString("User: ")
+		case RoleAssistant:
+			b.WriteString("Diesel: ")
+		default:
+			continue
+		}
+		b.WriteString(strings.TrimSpace(m.Content))
+		b.WriteByte('\n')
+	}
+	msgs = append(msgs, wireMsg{
+		Role:    RoleSystem,
+		Content: "Conversation to review (most recent last):\n\n" + b.String(),
+	})
+
+	msgs = append(msgs, wireMsg{Role: RoleSystem, Content: memoryInstruction})
+	return msgs
+}
+
+// assembleMessages builds the outgoing message list: the date and persona
+// system messages, the injected knowledge graph (when kb is set), the
+// emotion/dress/scene/pose continuity reminders, and the trailing history
+// window capped at HistoryMessages turns. The caller has already appended the
+// latest user message to history.
+func assembleMessages(ctx context.Context, s settings.AppSettings, history []Message, kb KnowledgeBase) []wireMsg {
+	msgs := make([]wireMsg, 0, len(history)+4)
+	msgs = append(msgs, wireMsg{
 		Role:    RoleSystem,
 		Content: "Current date and time: " + time.Now().Format("Monday, January 2, 2006 at 3:04 PM MST"),
 	})
-	msgs = append(msgs, Message{Role: RoleSystem, Content: settings.RenderSystemPrompt(s)})
-	// Remind the model of the expression it last wore so the portrait
-	// emotion has some turn-to-turn continuity. Skipped on the first turn
-	// of a conversation, where there's no prior assistant reply.
-	if e := lastEmotion(history); e != "" {
-		msgs = append(msgs, Message{
-			Role:    RoleSystem,
-			Content: "Your facial expression in your previous reply was: " + e,
-		})
+	msgs = append(msgs, wireMsg{Role: RoleSystem, Content: settings.RenderSystemPrompt(s)})
+
+	// Inject the knowledge graph right after the persona so the model reads
+	// "who Diesel is" then "what Diesel remembers" before anything else. The
+	// blob only grows; warn (don't truncate) once it gets large.
+	if kb != nil {
+		if graph, err := kb.GraphJSON(ctx); err != nil {
+			log.Printf("[chat] DEBUG knowledge graph unavailable for injection: %v", err)
+		} else if graph != "" {
+			log.Printf("[chat] DEBUG injecting knowledge graph: %d bytes (~%d tokens)", len(graph), settings.EstimateTokens(graph))
+			if n := settings.EstimateTokens(graph); n > knowledgeTokenWarn {
+				log.Printf("[chat] knowledge graph is large (~%d tokens); consider pruning", n)
+			}
+			msgs = append(msgs, wireMsg{
+				Role: RoleSystem,
+				Content: "This is your persistent memory — everything you currently know about the people, " +
+					"animals, places, and relationships in your life, as a knowledge graph in JSON. Treat it as " +
+					"established fact and stay consistent with it: use it to remember names, who owns what, where " +
+					"people work, and so on. Don't recite it back or mention that you have a \"knowledge graph\" — " +
+					"just let it inform how you talk, the way real memory does.\n\n" + graph,
+			})
+		}
 	}
-	// Likewise remind the model of its previous state of dress so the
-	// nudity flag has turn-to-turn continuity. Skipped on the first turn,
-	// where there's no prior assistant reply.
+
+	if e := lastEmotion(history); e != "" {
+		msgs = append(msgs, wireMsg{Role: RoleSystem, Content: "Your facial expression in your previous reply was: " + e})
+	}
 	if naked, ok := lastNaked(history); ok {
 		state := "clothed"
 		if naked {
 			state = "nude"
 		}
-		msgs = append(msgs, Message{
-			Role:    RoleSystem,
-			Content: "Your state of dress in your previous reply was: " + state,
-		})
+		msgs = append(msgs, wireMsg{Role: RoleSystem, Content: "Your state of dress in your previous reply was: " + state})
 	}
-	// Remind the model of the scene and posture it last chose so the
-	// portrait pipeline doesn't teleport Diesel between locations or
-	// postures every turn. The human-readable label comes from the comfyui
-	// scene table — slugs like "mechanics_shop" would read oddly here.
 	if bg := lastBackground(history); bg != "" {
 		if spec, ok := comfyui.ImageBackgrounds[bg]; ok {
-			msgs = append(msgs, Message{
-				Role:    RoleSystem,
-				Content: "You were last shown in: " + spec.Label,
-			})
+			msgs = append(msgs, wireMsg{Role: RoleSystem, Content: "You were last shown in: " + spec.Label})
 		}
 	}
 	if p := lastPose(history); p != "" {
 		if spec, ok := comfyui.ImagePoseBases[p]; ok {
-			msgs = append(msgs, Message{
-				Role:    RoleSystem,
-				Content: "Your last pose was: " + spec.Label,
-			})
+			msgs = append(msgs, wireMsg{Role: RoleSystem, Content: "Your last pose was: " + spec.Label})
 		}
 	}
+
 	start := 0
 	switch {
 	case s.HistoryMessages <= 0:
-		// "No history" still has to include the current user turn.
 		start = len(history) - 1
 	case len(history) > s.HistoryMessages:
 		start = len(history) - s.HistoryMessages
@@ -269,30 +491,34 @@ func Completion(ctx context.Context, s settings.AppSettings, history []Message) 
 		start = 0
 	}
 	for _, m := range history[start:] {
+		content := m.Content
 		if !m.Timestamp.IsZero() {
-			m.Content = "[" + m.Timestamp.Format("2006-01-02 15:04:05 MST") + "] " + m.Content
-			m.Timestamp = time.Time{}
+			content = "[" + m.Timestamp.Format("2006-01-02 15:04:05 MST") + "] " + content
 		}
-		// Emotion, Naked, Background, and Pose are internal bookkeeping —
-		// strip them so the wire body stays a plain role/content pair.
-		// The model's prior expression, state of dress, scene, and posture
-		// are fed back via the system messages above, not on the turn.
-		m.Emotion = ""
-		m.Naked = false
-		m.Background = ""
-		m.Pose = ""
-		msgs = append(msgs, m)
+		// Emotion/Naked/Background/Pose are internal bookkeeping fed back via
+		// the system messages above, not on the turn.
+		msgs = append(msgs, wireMsg{Role: m.Role, Content: content})
 	}
+	return msgs
+}
 
+// buildBody assembles the /chat/completions request body. tools (when
+// non-empty) advertises the knowledge functions with tool_choice "auto";
+// withSchema attaches the strict Reply response_format; disableReasoning sends
+// the family of "no thinking" flags. Unknown fields are ignored by
+// OpenAI-compatible servers.
+func buildBody(model string, msgs []wireMsg, tools []map[string]any, withSchema, disableReasoning bool) map[string]any {
 	body := map[string]any{
-		"model":    s.Model,
+		"model":    model,
 		"messages": msgs,
 		"stream":   false,
-		// Constrain the reply to {text, emotion} via OpenAI-compatible
-		// structured outputs. LM Studio and OpenAI honor this strictly;
-		// providers that ignore response_format fall through to the
-		// plain-text fallback in the response parser below.
-		"response_format": map[string]any{
+	}
+	if len(tools) > 0 {
+		body["tools"] = tools
+		body["tool_choice"] = "auto"
+	}
+	if withSchema {
+		body["response_format"] = map[string]any{
 			"type": "json_schema",
 			"json_schema": map[string]any{
 				"name":   "diesel_reply",
@@ -300,115 +526,156 @@ func Completion(ctx context.Context, s settings.AppSettings, history []Message) 
 				"schema": map[string]any{
 					"type": "object",
 					"properties": map[string]any{
-						"text": map[string]any{"type": "string"},
-						"emotion": map[string]any{
-							"type": "string",
-							"enum": Emotions,
-						},
-						"naked": map[string]any{"type": "boolean"},
-						"background": map[string]any{
-							"type": "string",
-							"enum": Backgrounds,
-						},
-						"pose": map[string]any{
-							"type": "string",
-							"enum": Poses,
-						},
+						"text":       map[string]any{"type": "string"},
+						"emotion":    map[string]any{"type": "string", "enum": Emotions},
+						"naked":      map[string]any{"type": "boolean"},
+						"background": map[string]any{"type": "string", "enum": Backgrounds},
+						"pose":       map[string]any{"type": "string", "enum": Poses},
 					},
 					"required":             []string{"text", "emotion", "naked", "background", "pose"},
 					"additionalProperties": false,
 				},
 			},
-		},
-		// Disable reasoning across the providers we might be talking to:
-		//   • OpenAI reasoning models   → reasoning_effort
+		}
+	}
+	if disableReasoning {
+		// Disable reasoning across the providers we might talk to:
+		//   • OpenAI reasoning models     → reasoning_effort
 		//   • Anthropic extended thinking → thinking.type
 		//   • Qwen3 / DeepSeek via llama.cpp/vLLM/LM Studio → chat_template_kwargs
-		"reasoning_effort":     "none",
-		"reasoning":            map[string]any{"effort": "none"},
-		"thinking":             map[string]any{"type": "disabled"},
-		"chat_template_kwargs": map[string]any{"enable_thinking": false},
+		body["reasoning_effort"] = "none"
+		body["reasoning"] = map[string]any{"effort": "none"}
+		body["thinking"] = map[string]any{"type": "disabled"}
+		body["chat_template_kwargs"] = map[string]any{"enable_thinking": false}
 	}
+	return body
+}
+
+// toolsToWire converts the knowledge ToolDefs into the OpenAI tools array
+// shape: {type:"function", function:{name, description, parameters:<schema>}}.
+func toolsToWire(defs []ToolDef) []map[string]any {
+	out := make([]map[string]any, 0, len(defs))
+	for _, d := range defs {
+		// Start from a minimal valid object schema and overlay the tool's own.
+		params := map[string]any{"type": "object", "properties": map[string]any{}}
+		if len(d.Schema) > 0 {
+			var parsed map[string]any
+			if err := json.Unmarshal(d.Schema, &parsed); err != nil {
+				log.Printf("[chat] skipping tool %q with bad schema: %v", d.Name, err)
+				continue
+			}
+			params = parsed
+			// A no-arg tool (e.g. read_graph) infers to {"type":"object"} with
+			// no "properties" key. Some OpenAI-compatible backends (LM Studio)
+			// strictly require function.parameters.properties to be present and
+			// 400 the whole request when it's missing — backfill it so every
+			// advertised tool carries a valid object schema.
+			if _, ok := params["type"]; !ok {
+				params["type"] = "object"
+			}
+			if _, ok := params["properties"]; !ok {
+				params["properties"] = map[string]any{}
+			}
+		}
+		out = append(out, map[string]any{
+			"type": "function",
+			"function": map[string]any{
+				"name":        d.Name,
+				"description": d.Description,
+				"parameters":  params,
+			},
+		})
+	}
+	return out
+}
+
+// truncate shortens s to at most n runes for log output, appending an ellipsis
+// marker when it had to cut. Keeps debug lines readable when a tool result or
+// argument blob is large.
+func truncate(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + fmt.Sprintf("…(+%d)", len(r)-n)
+}
+
+// llmChoice is the assistant message we care about from a completion: its text
+// content and any tool calls it requested.
+type llmChoice struct {
+	Content   string
+	ToolCalls []toolCall
+}
+
+// callLLM POSTs one request body and returns the assistant choice, the server-
+// reported usage, the HTTP status, and an error. The status is returned even
+// on error so the caller can decide whether a failure looks like a
+// tools/schema incompatibility worth retrying in two-phase mode.
+func callLLM(ctx context.Context, s settings.AppSettings, endpoint string, body map[string]any) (llmChoice, Usage, int, error) {
 	raw, err := json.Marshal(body)
 	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
-		return Reply{}, Usage{}, err
+		return llmChoice{}, Usage{}, 0, err
 	}
-
 	req, err := http.NewRequestWithContext(ctx, "POST", endpoint+"/chat/completions", bytes.NewReader(raw))
 	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
-		return Reply{}, Usage{}, err
+		return llmChoice{}, Usage{}, 0, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if key := strings.TrimSpace(s.APIKey); key != "" {
 		req.Header.Set("Authorization", "Bearer "+key)
 	}
-
-	// Long ceiling: local servers running a big model on a laptop can take
-	// well over a minute for the first token. We don't stream yet, so the
-	// whole completion has to fit inside this timeout.
+	// Long ceiling: a big local model can take over a minute, and a turn may
+	// make several calls. We don't stream yet, so each completion must fit.
+	_, hasTools := body["tools"]
+	_, hasSchema := body["response_format"]
+	_, reasoningOff := body["reasoning_effort"]
+	log.Printf("[chat] DEBUG POST %s/chat/completions (tools=%v schema=%v reasoningDisabled=%v bodyBytes=%d)",
+		endpoint, hasTools, hasSchema, reasoningOff, len(raw))
 	client := tracing.HTTPClient(5 * time.Minute)
 	resp, err := client.Do(req)
 	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
-		return Reply{}, Usage{}, err
+		log.Printf("[chat] DEBUG transport error: %v", err)
+		return llmChoice{}, Usage{}, 0, err
 	}
 	defer func() { _ = resp.Body.Close() }()
-
 	if resp.StatusCode != http.StatusOK {
-		err := util.HTTPStatusError(resp, 512)
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
-		return Reply{}, Usage{}, err
+		bodyErr := util.HTTPStatusError(resp, 512)
+		log.Printf("[chat] DEBUG non-200: status=%d body=%v", resp.StatusCode, bodyErr)
+		return llmChoice{}, Usage{}, resp.StatusCode, bodyErr
 	}
 
 	var payload struct {
 		Choices []struct {
 			Message struct {
-				Content string `json:"content"`
+				Content   string     `json:"content"`
+				ToolCalls []toolCall `json:"tool_calls"`
 			} `json:"message"`
 		} `json:"choices"`
 		Usage Usage `json:"usage"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
-		return Reply{}, Usage{}, err
+		return llmChoice{}, Usage{}, resp.StatusCode, err
 	}
-	// Attach the server-reported usage even on the fallback path below —
-	// callers (and span consumers) want the token counts regardless of
-	// whether the reply parsed as structured JSON.
-	span.SetAttributes(
-		attribute.Int("llm.usage.prompt_tokens", payload.Usage.PromptTokens),
-		attribute.Int("llm.usage.completion_tokens", payload.Usage.CompletionTokens),
-		attribute.Int("llm.usage.total_tokens", payload.Usage.TotalTokens),
-	)
 	if len(payload.Choices) == 0 {
-		err := fmt.Errorf("server returned no choices")
-		span.SetStatus(codes.Error, err.Error())
-		return Reply{}, Usage{}, err
+		return llmChoice{}, payload.Usage, resp.StatusCode, fmt.Errorf("server returned no choices")
 	}
-	content := strings.TrimSpace(thinkBlock.ReplaceAllString(payload.Choices[0].Message.Content, ""))
+	return llmChoice{
+		Content:   payload.Choices[0].Message.Content,
+		ToolCalls: payload.Choices[0].Message.ToolCalls,
+	}, payload.Usage, resp.StatusCode, nil
+}
+
+// finalizeReply parses content as the strict Reply JSON, applying the same
+// fallbacks the tool-free path always used: a non-JSON body becomes plain text
+// with a neutral emotion, and missing scene/pose inherit from the last
+// assistant turn (then the hardcoded defaults) so the portrait pipeline always
+// has a valid slug.
+func finalizeReply(content string, history []Message, span trace.Span) Reply {
+	content = strings.TrimSpace(thinkBlock.ReplaceAllString(content, ""))
 	content = leadingTimestamp.ReplaceAllString(content, "")
 
-	// Parse the structured reply. The schema is strict, so a healthy LM
-	// Studio / OpenAI response is valid JSON — trust it whenever it
-	// unmarshals, even when text is empty: an empty-text reply means the
-	// model legitimately chose to say nothing, and treating that as a
-	// parse failure would dump the raw `{"text":"",...}` blob straight
-	// into the transcript. Only a genuine unmarshal error (provider
-	// ignored response_format and returned prose) falls back to raw
-	// content with a neutral emotion so the chat keeps flowing.
 	var parsed Reply
 	if err := json.Unmarshal([]byte(content), &parsed); err != nil {
-		// On the fallback path, inherit scene/posture from the most
-		// recent assistant turn so a stray plain-text reply doesn't
-		// teleport Diesel back to the living room mid-conversation;
-		// only the very first turn lands on the hardcoded defaults.
 		bg := lastBackground(history)
 		if bg == "" {
 			bg = comfyui.DefaultImageBackground
@@ -424,21 +691,12 @@ func Completion(ctx context.Context, s settings.AppSettings, history []Message) 
 			attribute.String("llm.reply.background", bg),
 			attribute.String("llm.reply.pose", pose),
 		)
-		return Reply{
-			Text:       content,
-			Emotion:    "neutral",
-			Background: bg,
-			Pose:       pose,
-		}, payload.Usage, nil
+		return Reply{Text: content, Emotion: "neutral", Background: bg, Pose: pose}
 	}
 	parsed.Text = leadingTimestamp.ReplaceAllString(parsed.Text, "")
 	if parsed.Emotion == "" {
 		parsed.Emotion = "neutral"
 	}
-	// A compliant provider returns both fields populated, but a permissive
-	// one might omit them; fall back to the same inherit-then-default chain
-	// the parse-failure path uses so the composeImagePrompt call always has
-	// a valid slug to look up.
 	if parsed.Background == "" {
 		parsed.Background = lastBackground(history)
 		if parsed.Background == "" {
@@ -459,5 +717,24 @@ func Completion(ctx context.Context, s settings.AppSettings, history []Message) 
 		attribute.String("llm.reply.background", parsed.Background),
 		attribute.String("llm.reply.pose", parsed.Pose),
 	)
-	return parsed, payload.Usage, nil
+	return parsed
+}
+
+// addUsage sums two usage blocks across the multiple LLM calls a tool-using
+// turn can make, so the caller sees the turn's full token cost.
+func addUsage(a, b Usage) Usage {
+	return Usage{
+		PromptTokens:     a.PromptTokens + b.PromptTokens,
+		CompletionTokens: a.CompletionTokens + b.CompletionTokens,
+		TotalTokens:      a.TotalTokens + b.TotalTokens,
+	}
+}
+
+// recordUsage stamps the (possibly summed) token usage onto the span.
+func recordUsage(span trace.Span, u Usage) {
+	span.SetAttributes(
+		attribute.Int("llm.usage.prompt_tokens", u.PromptTokens),
+		attribute.Int("llm.usage.completion_tokens", u.CompletionTokens),
+		attribute.Int("llm.usage.total_tokens", u.TotalTokens),
+	)
 }

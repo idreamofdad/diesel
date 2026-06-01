@@ -91,6 +91,14 @@ const (
 	EventTurnError EventType = "turn_error"
 	// EventStatus is a free-form status string suitable for a status bar.
 	EventStatus EventType = "status"
+	// EventLLMActivity fires whenever the number of in-flight LLM operations
+	// crosses to/from zero. It covers BOTH the reply completion and the
+	// post-reply memory pass (which can overlap), so a UI can show a single
+	// "thinking" indicator that's lit whenever any model call is running —
+	// including the background memory write that has no other visible signal.
+	// LLMActive carries the current state; Status carries a short label
+	// ("Thinking…" / "Remembering…") for the most recent operation to start.
+	EventLLMActivity EventType = "llm_activity"
 	// EventCleared fires when the conversation is wiped (New Conversation).
 	EventCleared EventType = "cleared"
 	// EventBusy is sent only to the subscriber whose Send() was rejected
@@ -134,6 +142,9 @@ type Event struct {
 	Total int `json:"total,omitempty"`
 	// Status carries a short status-bar message for EventStatus.
 	Status string `json:"status,omitempty"`
+	// LLMActive is the indicator state on EventLLMActivity: true while one or
+	// more model calls (reply and/or memory pass) are running.
+	LLMActive bool `json:"llm_active,omitempty"`
 	// Error is the human-readable failure message for EventTurnError.
 	Error string `json:"error,omitempty"`
 	// Timestamp is when the event was generated, hub-wall-clock.
@@ -179,6 +190,21 @@ type Hub struct {
 	// freshly-subscribed client can be sent the current state instead of
 	// staring at a blank status bar until the next turn.
 	lastStatus string
+	// llmActive counts in-flight LLM operations (reply + memory passes, which
+	// can overlap). The "thinking" indicator is lit whenever it's > 0; the
+	// count is broadcast as a boolean on each transition via EventLLMActivity.
+	llmActive int
+	// kb is Diesel's persistent memory (the knowledge graph). The graph is
+	// injected into the reply prompt for reading, and a separate memory pass
+	// after each reply lets the model write to it. Set once at startup via
+	// SetKnowledge, before any turn runs; nil when the feature is wired off.
+	// Gated per-turn on settings.EnableKnowledge.
+	kb chat.KnowledgeBase
+	// memMu serializes the post-reply memory passes so two overlapping turns
+	// can't drive the MCP session / mutate the graph concurrently. Memory
+	// passes are best-effort and off the reply's critical path, so a brief
+	// queue here never delays a user's reply.
+	memMu sync.Mutex
 }
 
 // New returns an empty hub backed by store. Call Start to populate from
@@ -192,6 +218,14 @@ func New(store *storage.Store) *Hub {
 		audio:      newBlobCache(mediaCacheSize),
 		lastStatus: "Ready",
 	}
+}
+
+// SetKnowledge wires Diesel's persistent memory into the turn pipeline. Call
+// once at startup before the first Send; passing nil leaves memory disabled.
+func (h *Hub) SetKnowledge(kb chat.KnowledgeBase) {
+	h.mu.Lock()
+	h.kb = kb
+	h.mu.Unlock()
 }
 
 // Start loads persisted history from disk when SaveToDisk is enabled and
@@ -289,6 +323,38 @@ func (h *Hub) InFlight() bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.inFlight
+}
+
+// LLMActive reports whether any model call (reply or memory pass) is currently
+// running — what the "thinking" indicator shows. Used to seed freshly-connected
+// clients.
+func (h *Hub) LLMActive() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.llmActive > 0
+}
+
+// llmEnter marks the start of an LLM operation and, when it's the first one in
+// flight, broadcasts that the indicator should light up. label is a short
+// description of what's running, surfaced to the UI.
+func (h *Hub) llmEnter(label string) {
+	h.mu.Lock()
+	h.llmActive++
+	active := h.llmActive > 0
+	h.mu.Unlock()
+	h.broadcast(Event{Type: EventLLMActivity, LLMActive: active, Status: label, Timestamp: time.Now()})
+}
+
+// llmExit marks the end of an LLM operation and broadcasts the indicator state,
+// turning it off once the last in-flight operation finishes.
+func (h *Hub) llmExit() {
+	h.mu.Lock()
+	if h.llmActive > 0 {
+		h.llmActive--
+	}
+	active := h.llmActive > 0
+	h.mu.Unlock()
+	h.broadcast(Event{Type: EventLLMActivity, LLMActive: active, Timestamp: time.Now()})
 }
 
 // Portrait returns the PNG bytes for a previously-broadcast portrait ID,
@@ -419,7 +485,19 @@ func (h *Hub) runTurn(ctx context.Context, s settings.AppSettings, user chat.Mes
 	)
 	defer turnSpan.End()
 
-	reply, usage, err := chat.Completion(turnCtx, s, snapshot)
+	// Hand the model its memory only when the feature is on. h.kb is set at
+	// startup; read it under the lock to stay race-free with SetKnowledge.
+	h.mu.Lock()
+	kb := h.kb
+	h.mu.Unlock()
+	if !s.EnableKnowledge {
+		kb = nil
+	}
+	log.Printf("[hub] DEBUG turn %d: EnableKnowledge=%v kbWired=%v -> kb passed=%v",
+		turnID, s.EnableKnowledge, h.kb != nil, kb != nil)
+	h.llmEnter("Replying…")
+	reply, usage, err := chat.Completion(turnCtx, s, snapshot, kb)
+	h.llmExit()
 	if err != nil {
 		turnSpan.RecordError(err)
 		turnSpan.SetStatus(codes.Error, err.Error())
@@ -488,6 +566,29 @@ func (h *Hub) runTurn(ctx context.Context, s settings.AppSettings, user chat.Mes
 	// forever for a synthesis that's never coming.
 	go h.synthesizeAudio(turnCtx, s, reply, origin, turnID)
 	go h.renderPortrait(turnCtx, s, reply, turnID, landscape)
+
+	// Second pass: now that the user has their reply, let the model record
+	// anything durable it learned this turn into the knowledge graph. This is
+	// tools-only (no schema) and fully off the reply's critical path, so it
+	// never adds latency to what the user sees. The memory it writes shows up
+	// in the next turn's injected graph.
+	if kb != nil {
+		memHistory := append(append([]chat.Message(nil), snapshot...), assistant)
+		go h.updateMemory(turnCtx, s, memHistory, kb, turnID)
+	}
+}
+
+// updateMemory runs the post-reply memory pass, serialized against other turns
+// so overlapping passes don't contend on the MCP session or the graph. Errors
+// are logged, not surfaced — the reply has already been delivered.
+func (h *Hub) updateMemory(ctx context.Context, s settings.AppSettings, history []chat.Message, kb chat.KnowledgeBase, turnID int64) {
+	h.memMu.Lock()
+	defer h.memMu.Unlock()
+	h.llmEnter("Remembering…")
+	defer h.llmExit()
+	if err := chat.MemoryPass(ctx, s, history, kb); err != nil {
+		log.Printf("[hub] memory pass (turn %d): %v", turnID, err)
+	}
 }
 
 // synthesizeAudio runs TTS and broadcasts EventAudioReady when done.

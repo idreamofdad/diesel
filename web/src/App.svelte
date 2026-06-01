@@ -12,12 +12,15 @@
     muted,
     identityConfigured,
     fetchSettings,
+    llmActive,
   } from './lib/hub';
   import Transcript from './lib/Transcript.svelte';
   import ChatInput from './lib/ChatInput.svelte';
   import MicButton from './lib/MicButton.svelte';
   import Portrait from './lib/Portrait.svelte';
   import Settings from './lib/Settings.svelte';
+  import Knowledge from './lib/Knowledge.svelte';
+  import KnowledgeGraph from './lib/KnowledgeGraph.svelte';
 
   let messages = $state<any[]>([]);
   let status = $state('Connecting…');
@@ -27,7 +30,18 @@
   let tokens = $state<{ prompt_tokens?: number; completion_tokens?: number; total_tokens?: number }>({});
   let mutedNow = $state(false);
   let showSettings = $state(false);
+  let showKnowledge = $state(false);
   let identityOK = $state(false);
+  let thinking = $state(false);
+  // Minimal client-side routing: "/knowledge" shows the relationship graph,
+  // anything else shows the chat. The Go server already falls back to
+  // index.html for extensionless paths, so a direct hit / refresh on
+  // /knowledge loads the SPA here.
+  let route = $state(window.location.pathname);
+  function navigate(to: string) {
+    if (to !== window.location.pathname) window.history.pushState({}, '', to);
+    route = to;
+  }
 
   // Wire the imperative stores to local $state — the templates can't
   // bind directly to a custom Writable, so we mirror via subscribe.
@@ -41,13 +55,20 @@
       usage.subscribe(v => { tokens = v; }),
       muted.subscribe(v => { mutedNow = v; }),
       identityConfigured.subscribe(v => { identityOK = v; }),
+      llmActive.subscribe(v => { thinking = v; }),
     ];
+    // Keep the route in sync with browser back/forward.
+    const onPop = () => { route = window.location.pathname; };
+    window.addEventListener('popstate', onPop);
     connect();
     // Seed identityConfigured on load — the WebSocket protocol doesn't
     // carry settings, so the only way to know whether Send should be
     // gated is to hit the REST endpoint once.
     fetchSettings().catch(() => {});
-    return () => unsubs.forEach(u => u());
+    return () => {
+      unsubs.forEach(u => u());
+      window.removeEventListener('popstate', onPop);
+    };
   });
 
   function tokensSummary() {
@@ -72,20 +93,34 @@
   }
 </script>
 
+{#if route === '/knowledge'}
+  <KnowledgeGraph onback={() => navigate('/')} />
+{:else}
 <main>
   <header>
     <div class="title">Diesel</div>
     <div class="actions">
+      {#if thinking}
+        <span class="thinking" title="A model call is running (reply or memory update)">
+          <span class="dot"></span> working…
+        </span>
+      {/if}
       <span class="conn" class:online>{online ? '● connected' : '○ disconnected'}</span>
       <button onclick={toggleMute} title={mutedNow ? 'Unmute replies' : 'Mute replies'}>
         {mutedNow ? '🔇' : '🔊'}
       </button>
+      <button onclick={() => navigate('/knowledge')} title="Relationship graph">🕸</button>
+      <button onclick={() => (showKnowledge = !showKnowledge)} title="Edit memory">🧠</button>
       <button onclick={() => (showSettings = !showSettings)} title="Settings">⚙</button>
     </div>
   </header>
 
   {#if showSettings}
     <Settings onclose={closeSettings} />
+  {/if}
+
+  {#if showKnowledge}
+    <Knowledge onclose={() => (showKnowledge = false)} />
   {/if}
 
   <section class="body">
@@ -109,6 +144,7 @@
     <span class="tokens">{tokensSummary()}</span>
   </footer>
 </main>
+{/if}
 
 <style>
   main {
@@ -128,6 +164,25 @@
   .actions { display: flex; gap: 0.5rem; align-items: center; }
   .conn { font-size: 0.85rem; color: var(--muted); }
   .conn.online { color: #6ec46e; }
+
+  .thinking {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 0.85rem;
+    color: var(--accent-them, #7aa2f7);
+  }
+  .thinking .dot {
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: 50%;
+    background: currentColor;
+    animation: pulse 1s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 0.3; transform: scale(0.8); }
+    50% { opacity: 1; transform: scale(1.1); }
+  }
 
   .body {
     flex: 1 1 auto;
