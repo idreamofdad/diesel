@@ -276,13 +276,34 @@ func Completion(ctx context.Context, s settings.AppSettings, history []Message, 
 // memoryInstruction steers the second-pass model: look at the conversation it
 // just had and record anything durable through the write tools. It's appended
 // as the final system message of the memory pass, after the persona + graph +
-// history that assembleMessages already laid down.
-const memoryInstruction = `You are updating your own long-term memory after the conversation above.
-Review the latest exchange. If the user revealed durable, factual information worth remembering — people, animals, places, jobs, relationships, preferences, important events — record it now using your memory tools:
-- create_entities for new people/animals/things (give each a name and a type).
-- add_observations to attach facts to an existing entity.
-- create_relations to link two existing entities (active voice, e.g. owns, works_at, lives_in). Create both entities first.
-Only store durable facts, not small talk or transient state. Skip anything already in the graph above. If there is nothing new worth saving, do nothing and don't call any tools. Do not produce a chat reply — only tool calls.`
+// history that assembleMessages already laid down. It's deliberately concrete
+// and example-driven — small local models follow a worked example far more
+// reliably than abstract rules.
+const memoryInstruction = `# Updating your memory
+
+You are now updating your own long-term memory based on the conversation above. This is a background step — do NOT write a chat reply, only call tools.
+
+Your memory is a knowledge graph of three things:
+- ENTITIES — the people, animals, places, and things you know. Each has a unique name and a type (e.g. name "Tyr Mactire", type "person"; name "Beckett", type "cat").
+- OBSERVATIONS — short factual notes attached to one entity (e.g. on "Tyr Mactire": "works at McDonalds").
+- RELATIONS — directed links between two entities, written in active voice (e.g. "Tyr Mactire" —owns→ "Beckett").
+
+You have these tools:
+- create_entities — add new entities. Pass each as {name, entityType, observations:[]}. Re-using a name just merges in new observations, so it's safe.
+- add_observations — attach new facts to an entity that already exists. Pass {entityName, contents:[...]}.
+- create_relations — link two entities that BOTH already exist. Pass {from, to, relationType}. If an endpoint doesn't exist yet, create it first or the call is rejected.
+- delete_entities / delete_observations / delete_relations — remove things that are now wrong or contradicted.
+
+Worked example — if the user said "I'm Tyr Mactire, I work at McDonalds, and I have a cat named Beckett", you would call:
+1. create_entities: [{name:"Tyr Mactire", entityType:"person", observations:["works at McDonalds"]}, {name:"Beckett", entityType:"cat", observations:[]}]
+2. create_relations: [{from:"Tyr Mactire", to:"Beckett", relationType:"owns"}]
+
+Rules:
+- Only record DURABLE facts (names, jobs, relationships, pets, where someone lives, lasting preferences). Ignore small talk and passing moods.
+- Check the graph above first — don't re-create entities or re-add observations that are already there.
+- Create entities before relating them.
+- If a new fact contradicts an old one, delete the stale piece and add the correct one.
+- If nothing new and durable came up, call no tools at all.`
 
 // MemoryPass is the second pass of the turn: after the user already has their
 // reply, the model gets the conversation plus its current memory and a set of
@@ -383,11 +404,11 @@ func assembleMessages(ctx context.Context, s settings.AppSettings, history []Mes
 			}
 			msgs = append(msgs, wireMsg{
 				Role: RoleSystem,
-				Content: "This is your persistent memory — everything you currently know, as a knowledge graph in JSON. " +
-					"Treat it as fact and stay consistent with it. When you learn something new, durable, and worth " +
-					"remembering about someone or something, use your memory tools (create_entities, add_observations, " +
-					"create_relations, …) to record it; remove things that become wrong. Don't announce that you're " +
-					"updating your memory — just do it.\n\n" + graph,
+				Content: "This is your persistent memory — everything you currently know about the people, " +
+					"animals, places, and relationships in your life, as a knowledge graph in JSON. Treat it as " +
+					"established fact and stay consistent with it: use it to remember names, who owns what, where " +
+					"people work, and so on. Don't recite it back or mention that you have a \"knowledge graph\" — " +
+					"just let it inform how you talk, the way real memory does.\n\n" + graph,
 			})
 		}
 	}
