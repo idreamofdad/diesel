@@ -18,6 +18,7 @@
   import MicButton from './lib/MicButton.svelte';
   import Portrait from './lib/Portrait.svelte';
   import Settings from './lib/Settings.svelte';
+  import Knowledge from './lib/Knowledge.svelte';
 
   let messages = $state<any[]>([]);
   let status = $state('Connecting…');
@@ -27,6 +28,7 @@
   let tokens = $state<{ prompt_tokens?: number; completion_tokens?: number; total_tokens?: number }>({});
   let mutedNow = $state(false);
   let showSettings = $state(false);
+  let showKnowledge = $state(false);
   let identityOK = $state(false);
 
   // Wire the imperative stores to local $state — the templates can't
@@ -80,12 +82,17 @@
       <button onclick={toggleMute} title={mutedNow ? 'Unmute replies' : 'Mute replies'}>
         {mutedNow ? '🔇' : '🔊'}
       </button>
+      <button onclick={() => (showKnowledge = !showKnowledge)} title="Knowledge graph">🧠</button>
       <button onclick={() => (showSettings = !showSettings)} title="Settings">⚙</button>
     </div>
   </header>
 
   {#if showSettings}
     <Settings onclose={closeSettings} />
+  {/if}
+
+  {#if showKnowledge}
+    <Knowledge onclose={() => (showKnowledge = false)} />
   {/if}
 
   <section class="body">

@@ -184,6 +184,21 @@ type AppSettings struct {
 	MatrixBotUserID   string `json:"matrix_bot_user_id"`
 	MatrixPassword    string `json:"matrix_password"`
 	MatrixAllowedUser string `json:"matrix_allowed_user"`
+	// Knowledge graph. EnableKnowledge turns on the persistent-memory feature:
+	// the companion model is offered the graph CRUD tools each turn and the
+	// whole graph is injected into its system prompt as JSON. Defaults on —
+	// it's the headline feature — but degrades gracefully when the backend
+	// can't do tool-calling (the chat layer probes and falls back). The MCP
+	// server backing the graph always runs in-process for the model; the
+	// optional HTTP listener (KnowledgeMCPEnableHTTP) additionally exposes the
+	// SAME graph to external MCP clients (Claude Desktop, …). It binds
+	// loopback only and requires a non-empty KnowledgeMCPAuthToken before it
+	// will start — the network door can rewrite the model's memory, so it's
+	// off by default and token-gated when on.
+	EnableKnowledge        bool   `json:"enable_knowledge"`
+	KnowledgeMCPEnableHTTP bool   `json:"knowledge_mcp_enable_http"`
+	KnowledgeMCPPort       int    `json:"knowledge_mcp_port"`
+	KnowledgeMCPAuthToken  string `json:"knowledge_mcp_auth_token"`
 }
 
 // Default returns the starting values used when no settings file exists
@@ -212,6 +227,12 @@ func Default() AppSettings {
 		// the network checkbox is the explicit "I know what I'm doing"
 		// gesture for LAN exposure.
 		ServerPort: 7777,
+		// Knowledge graph on by default — it's the persistent-memory
+		// feature, and it self-disables on backends that can't tool-call.
+		// The external MCP listener stays off until explicitly enabled;
+		// 7778 sits right next to the web server's 7777.
+		EnableKnowledge:  true,
+		KnowledgeMCPPort: 7778,
 	}
 }
 

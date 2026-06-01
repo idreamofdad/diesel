@@ -24,6 +24,7 @@ import (
 
 	"diesel/internal/audio"
 	"diesel/internal/hub"
+	"diesel/internal/knowledge"
 	"diesel/internal/settings"
 	"diesel/internal/util"
 
@@ -50,6 +51,9 @@ type Manager struct {
 	// applied snapshots the config the current srv was started with, so
 	// Apply can short-circuit when nothing material changed.
 	applied serverConfig
+	// knStore backs the /api/v1/knowledge routes. Wired via SetKnowledge at
+	// startup; nil leaves those routes returning 501.
+	knStore *knowledge.Store
 }
 
 // serverConfig is the subset of AppSettings the server actually cares
@@ -267,6 +271,7 @@ func (m *Manager) buildRouter(token string) *gin.Engine {
 	api.POST("/settings/models", m.handleSettingsModels)
 	api.POST("/settings/test", m.handleSettingsTest)
 	api.POST("/settings/test-tts", m.handleSettingsTestTTS)
+	m.registerKnowledgeRoutes(api)
 
 	// The API description is served unauthenticated off the root so a
 	// client can discover the surface (and the auth scheme) before it

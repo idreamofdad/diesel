@@ -11,6 +11,7 @@ import (
 	"diesel/internal/audio"
 	"diesel/internal/chat"
 	"diesel/internal/hub"
+	"diesel/internal/knowledge"
 	"diesel/internal/matrix"
 	"diesel/internal/server"
 	"diesel/internal/settings"
@@ -108,9 +109,23 @@ func main() {
 	h := hub.New(store)
 	h.Start(context.Background())
 
+	// Knowledge graph (Diesel's persistent memory). The in-process MCP server
+	// + in-memory client session come up here; the model's tools and the
+	// system-prompt injection flow through the bridge handed to the hub. The
+	// optional external HTTP listener is configured via Apply, hot-reapplied
+	// on every settings Save just like the other managers.
+	knMgr, err := knowledge.New(store)
+	if err != nil {
+		log.Fatalf("[knowledge] init: %v", err)
+	}
+	defer knMgr.Stop()
+	h.SetKnowledge(knMgr.Bridge())
+	knMgr.Apply(settings.Load())
+
 	// HTTP server + bridges. Each has the same Apply/Stop shape — opt-in via
 	// settings, hot-reapplied on every Save.
 	srvMgr := server.New(h, embeddedWebFS())
+	srvMgr.SetKnowledge(knMgr.Store())
 	srvMgr.Apply(settings.Load())
 	defer srvMgr.Stop()
 	smsMgr := sms.New(h, store)
@@ -435,9 +450,12 @@ func main() {
 	settingsItem := fyne.NewMenuItem("Settings…", func() {
 		// Identity gates Send — re-evaluate after the dialog closes so saving
 		// flips the input from disabled to enabled (or back) immediately.
-		showSettingsDialog(win, srvMgr, smsMgr, tgMgr, mxMgr, refreshInputEnabled)
+		showSettingsDialog(win, srvMgr, smsMgr, tgMgr, mxMgr, knMgr, refreshInputEnabled)
 	})
-	win.SetMainMenu(fyne.NewMainMenu(fyne.NewMenu("File", newItem, settingsItem)))
+	knowledgeItem := fyne.NewMenuItem("Knowledge…", func() {
+		showKnowledgeDialog(win, knMgr)
+	})
+	win.SetMainMenu(fyne.NewMainMenu(fyne.NewMenu("File", newItem, settingsItem, knowledgeItem)))
 
 	// ─── Layout ────────────────────────────────────────────────────────────
 	const glyphBtnSize = float32(36)
@@ -469,6 +487,7 @@ func main() {
 	smsMgr.Stop()
 	tgMgr.Stop()
 	mxMgr.Stop()
+	knMgr.Stop()
 	h.Unsubscribe(desktopOrigin)
 	h.Stop()
 }

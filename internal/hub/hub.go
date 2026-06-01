@@ -179,6 +179,17 @@ type Hub struct {
 	// freshly-subscribed client can be sent the current state instead of
 	// staring at a blank status bar until the next turn.
 	lastStatus string
+	// kb is Diesel's persistent memory (the knowledge graph). The graph is
+	// injected into the reply prompt for reading, and a separate memory pass
+	// after each reply lets the model write to it. Set once at startup via
+	// SetKnowledge, before any turn runs; nil when the feature is wired off.
+	// Gated per-turn on settings.EnableKnowledge.
+	kb chat.KnowledgeBase
+	// memMu serializes the post-reply memory passes so two overlapping turns
+	// can't drive the MCP session / mutate the graph concurrently. Memory
+	// passes are best-effort and off the reply's critical path, so a brief
+	// queue here never delays a user's reply.
+	memMu sync.Mutex
 }
 
 // New returns an empty hub backed by store. Call Start to populate from
@@ -192,6 +203,14 @@ func New(store *storage.Store) *Hub {
 		audio:      newBlobCache(mediaCacheSize),
 		lastStatus: "Ready",
 	}
+}
+
+// SetKnowledge wires Diesel's persistent memory into the turn pipeline. Call
+// once at startup before the first Send; passing nil leaves memory disabled.
+func (h *Hub) SetKnowledge(kb chat.KnowledgeBase) {
+	h.mu.Lock()
+	h.kb = kb
+	h.mu.Unlock()
 }
 
 // Start loads persisted history from disk when SaveToDisk is enabled and
@@ -419,7 +438,17 @@ func (h *Hub) runTurn(ctx context.Context, s settings.AppSettings, user chat.Mes
 	)
 	defer turnSpan.End()
 
-	reply, usage, err := chat.Completion(turnCtx, s, snapshot)
+	// Hand the model its memory only when the feature is on. h.kb is set at
+	// startup; read it under the lock to stay race-free with SetKnowledge.
+	h.mu.Lock()
+	kb := h.kb
+	h.mu.Unlock()
+	if !s.EnableKnowledge {
+		kb = nil
+	}
+	log.Printf("[hub] DEBUG turn %d: EnableKnowledge=%v kbWired=%v -> kb passed=%v",
+		turnID, s.EnableKnowledge, h.kb != nil, kb != nil)
+	reply, usage, err := chat.Completion(turnCtx, s, snapshot, kb)
 	if err != nil {
 		turnSpan.RecordError(err)
 		turnSpan.SetStatus(codes.Error, err.Error())
@@ -488,6 +517,27 @@ func (h *Hub) runTurn(ctx context.Context, s settings.AppSettings, user chat.Mes
 	// forever for a synthesis that's never coming.
 	go h.synthesizeAudio(turnCtx, s, reply, origin, turnID)
 	go h.renderPortrait(turnCtx, s, reply, turnID, landscape)
+
+	// Second pass: now that the user has their reply, let the model record
+	// anything durable it learned this turn into the knowledge graph. This is
+	// tools-only (no schema) and fully off the reply's critical path, so it
+	// never adds latency to what the user sees. The memory it writes shows up
+	// in the next turn's injected graph.
+	if kb != nil {
+		memHistory := append(append([]chat.Message(nil), snapshot...), assistant)
+		go h.updateMemory(turnCtx, s, memHistory, kb, turnID)
+	}
+}
+
+// updateMemory runs the post-reply memory pass, serialized against other turns
+// so overlapping passes don't contend on the MCP session or the graph. Errors
+// are logged, not surfaced — the reply has already been delivered.
+func (h *Hub) updateMemory(ctx context.Context, s settings.AppSettings, history []chat.Message, kb chat.KnowledgeBase, turnID int64) {
+	h.memMu.Lock()
+	defer h.memMu.Unlock()
+	if err := chat.MemoryPass(ctx, s, history, kb); err != nil {
+		log.Printf("[hub] memory pass (turn %d): %v", turnID, err)
+	}
 }
 
 // synthesizeAudio runs TTS and broadcasts EventAudioReady when done.

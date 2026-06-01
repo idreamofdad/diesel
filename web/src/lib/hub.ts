@@ -418,3 +418,89 @@ export async function testTTS(body: ProbeBody): Promise<Blob> {
   }
   return resp.blob();
 }
+
+// ─── Knowledge graph API ───────────────────────────────────────────────
+// Thin wrappers over the /api/v1/knowledge routes — the same graph the
+// companion model edits via its MCP tools. Field names mirror the Go
+// knowledge package's JSON tags (internal/knowledge/graph.go). Mutating
+// calls throw with the server's message on failure so the editor can show
+// domain errors verbatim (e.g. "entity does not exist; create it first").
+
+export interface KGEntity {
+  name: string;
+  entityType: string;
+  observations: string[];
+}
+
+export interface KGRelation {
+  from: string;
+  to: string;
+  relationType: string;
+}
+
+export interface KnowledgeGraph {
+  entities: KGEntity[];
+  relations: KGRelation[];
+}
+
+async function knowledgePost(path: string, body: unknown): Promise<any> {
+  const resp = await fetch(path, {
+    method: 'POST',
+    headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!resp.ok) {
+    let msg = `HTTP ${resp.status}`;
+    try {
+      const data = await resp.json();
+      if (data.error) msg = data.error;
+    } catch {
+      /* non-JSON body — keep the status message */
+    }
+    throw new Error(msg);
+  }
+  return resp.json();
+}
+
+export async function fetchGraph(): Promise<KnowledgeGraph> {
+  const resp = await fetch('/api/v1/knowledge', { headers: authHeaders() });
+  if (resp.status === 501) throw new Error('Knowledge graph is not available on this server.');
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  const g: KnowledgeGraph = await resp.json();
+  // The Go side guarantees non-null slices, but be defensive for older builds.
+  g.entities ??= [];
+  g.relations ??= [];
+  return g;
+}
+
+export async function createEntity(name: string, entityType: string): Promise<void> {
+  await knowledgePost('/api/v1/knowledge/entities', {
+    entities: [{ name, entityType, observations: [] }],
+  });
+}
+
+export async function deleteEntity(name: string): Promise<void> {
+  await knowledgePost('/api/v1/knowledge/entities/delete', { names: [name] });
+}
+
+export async function addObservation(entityName: string, content: string): Promise<void> {
+  await knowledgePost('/api/v1/knowledge/observations', {
+    observations: [{ entityName, contents: [content] }],
+  });
+}
+
+export async function deleteObservation(entityName: string, content: string): Promise<void> {
+  await knowledgePost('/api/v1/knowledge/observations/delete', {
+    deletions: [{ entityName, contents: [content] }],
+  });
+}
+
+export async function createRelation(from: string, to: string, relationType: string): Promise<void> {
+  await knowledgePost('/api/v1/knowledge/relations', {
+    relations: [{ from, to, relationType }],
+  });
+}
+
+export async function deleteRelation(rel: KGRelation): Promise<void> {
+  await knowledgePost('/api/v1/knowledge/relations/delete', { relations: [rel] });
+}
