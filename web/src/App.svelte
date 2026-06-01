@@ -20,6 +20,7 @@
   import Portrait from './lib/Portrait.svelte';
   import Settings from './lib/Settings.svelte';
   import Knowledge from './lib/Knowledge.svelte';
+  import KnowledgeGraph from './lib/KnowledgeGraph.svelte';
 
   let messages = $state<any[]>([]);
   let status = $state('Connecting…');
@@ -32,6 +33,15 @@
   let showKnowledge = $state(false);
   let identityOK = $state(false);
   let thinking = $state(false);
+  // Minimal client-side routing: "/knowledge" shows the relationship graph,
+  // anything else shows the chat. The Go server already falls back to
+  // index.html for extensionless paths, so a direct hit / refresh on
+  // /knowledge loads the SPA here.
+  let route = $state(window.location.pathname);
+  function navigate(to: string) {
+    if (to !== window.location.pathname) window.history.pushState({}, '', to);
+    route = to;
+  }
 
   // Wire the imperative stores to local $state — the templates can't
   // bind directly to a custom Writable, so we mirror via subscribe.
@@ -47,12 +57,18 @@
       identityConfigured.subscribe(v => { identityOK = v; }),
       llmActive.subscribe(v => { thinking = v; }),
     ];
+    // Keep the route in sync with browser back/forward.
+    const onPop = () => { route = window.location.pathname; };
+    window.addEventListener('popstate', onPop);
     connect();
     // Seed identityConfigured on load — the WebSocket protocol doesn't
     // carry settings, so the only way to know whether Send should be
     // gated is to hit the REST endpoint once.
     fetchSettings().catch(() => {});
-    return () => unsubs.forEach(u => u());
+    return () => {
+      unsubs.forEach(u => u());
+      window.removeEventListener('popstate', onPop);
+    };
   });
 
   function tokensSummary() {
@@ -77,6 +93,9 @@
   }
 </script>
 
+{#if route === '/knowledge'}
+  <KnowledgeGraph onback={() => navigate('/')} />
+{:else}
 <main>
   <header>
     <div class="title">Diesel</div>
@@ -90,7 +109,8 @@
       <button onclick={toggleMute} title={mutedNow ? 'Unmute replies' : 'Mute replies'}>
         {mutedNow ? '🔇' : '🔊'}
       </button>
-      <button onclick={() => (showKnowledge = !showKnowledge)} title="Knowledge graph">🧠</button>
+      <button onclick={() => navigate('/knowledge')} title="Relationship graph">🕸</button>
+      <button onclick={() => (showKnowledge = !showKnowledge)} title="Edit memory">🧠</button>
       <button onclick={() => (showSettings = !showSettings)} title="Settings">⚙</button>
     </div>
   </header>
@@ -124,6 +144,7 @@
     <span class="tokens">{tokensSummary()}</span>
   </footer>
 </main>
+{/if}
 
 <style>
   main {
