@@ -413,9 +413,10 @@ func authMiddleware(token string) gin.HandlerFunc {
 func (m *Manager) handleState(c *gin.Context) {
 	hist := m.hub.History()
 	resp := gin.H{
-		"history":   hist,
-		"in_flight": m.hub.InFlight(),
-		"status":    m.hub.LastStatus(),
+		"history":    hist,
+		"in_flight":  m.hub.InFlight(),
+		"llm_active": m.hub.LLMActive(),
+		"status":     m.hub.LastStatus(),
 	}
 	if id, png := m.hub.LatestPortrait(); id != "" && len(png) > 0 {
 		resp["portrait_url"] = "/api/v1/portrait/" + id

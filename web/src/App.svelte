@@ -12,6 +12,7 @@
     muted,
     identityConfigured,
     fetchSettings,
+    llmActive,
   } from './lib/hub';
   import Transcript from './lib/Transcript.svelte';
   import ChatInput from './lib/ChatInput.svelte';
@@ -30,6 +31,7 @@
   let showSettings = $state(false);
   let showKnowledge = $state(false);
   let identityOK = $state(false);
+  let thinking = $state(false);
 
   // Wire the imperative stores to local $state — the templates can't
   // bind directly to a custom Writable, so we mirror via subscribe.
@@ -43,6 +45,7 @@
       usage.subscribe(v => { tokens = v; }),
       muted.subscribe(v => { mutedNow = v; }),
       identityConfigured.subscribe(v => { identityOK = v; }),
+      llmActive.subscribe(v => { thinking = v; }),
     ];
     connect();
     // Seed identityConfigured on load — the WebSocket protocol doesn't
@@ -78,6 +81,11 @@
   <header>
     <div class="title">Diesel</div>
     <div class="actions">
+      {#if thinking}
+        <span class="thinking" title="A model call is running (reply or memory update)">
+          <span class="dot"></span> working…
+        </span>
+      {/if}
       <span class="conn" class:online>{online ? '● connected' : '○ disconnected'}</span>
       <button onclick={toggleMute} title={mutedNow ? 'Unmute replies' : 'Mute replies'}>
         {mutedNow ? '🔇' : '🔊'}
@@ -135,6 +143,25 @@
   .actions { display: flex; gap: 0.5rem; align-items: center; }
   .conn { font-size: 0.85rem; color: var(--muted); }
   .conn.online { color: #6ec46e; }
+
+  .thinking {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 0.85rem;
+    color: var(--accent-them, #7aa2f7);
+  }
+  .thinking .dot {
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: 50%;
+    background: currentColor;
+    animation: pulse 1s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 0.3; transform: scale(0.8); }
+    50% { opacity: 1; transform: scale(1.1); }
+  }
 
   .body {
     flex: 1 1 auto;

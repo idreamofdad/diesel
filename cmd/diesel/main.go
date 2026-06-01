@@ -165,9 +165,21 @@ func main() {
 	statusLabel.Truncation = fyne.TextTruncateEllipsis
 	setStatus := func(msg string) { statusLabel.SetText(msg) }
 	tokensLabel := widget.NewLabel("")
+	// LLM-activity indicator: an animated spinner + caption that's lit
+	// whenever any model call is running — the reply AND the background
+	// memory pass (which otherwise has no visible signal). Driven by
+	// hub.EventLLMActivity in dispatchEvent below.
+	llmSpinner := widget.NewActivity()
+	llmSpinner.Stop()
+	llmCaption := widget.NewLabel("")
+	llmIndicator := container.NewHBox(
+		container.NewGridWrap(fyne.NewSize(16, 16), llmSpinner),
+		llmCaption,
+	)
+	llmIndicator.Hide()
 	footer := container.NewVBox(
 		widget.NewSeparator(),
-		container.NewBorder(nil, nil, nil, tokensLabel, statusLabel),
+		container.NewBorder(nil, nil, llmIndicator, tokensLabel, statusLabel),
 	)
 
 	// ─── Shared UI state ───────────────────────────────────────────────────
@@ -409,6 +421,21 @@ func main() {
 			}
 			inFlight = false
 			refreshInputEnabled()
+		case hub.EventLLMActivity:
+			// Light the spinner whenever any model call is running (reply or
+			// the background memory pass). ev.Status carries a label on the
+			// transitions that start an operation.
+			if ev.LLMActive {
+				if ev.Status != "" {
+					llmCaption.SetText(ev.Status)
+				}
+				llmIndicator.Show()
+				llmSpinner.Start()
+			} else {
+				llmSpinner.Stop()
+				llmCaption.SetText("")
+				llmIndicator.Hide()
+			}
 		case hub.EventStatus:
 			setStatus(ev.Status)
 		case hub.EventCleared:

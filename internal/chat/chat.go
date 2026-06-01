@@ -337,14 +337,15 @@ func MemoryPass(ctx context.Context, s settings.AppSettings, history []Message, 
 		return nil
 	}
 
-	msgs := assembleMessages(ctx, s, history, kb)
-	msgs = append(msgs, wireMsg{Role: RoleSystem, Content: memoryInstruction})
+	msgs := memoryMessages(ctx, s, history, kb)
 
 	rounds := 0
 	for iter := 0; iter < maxToolIterations; iter++ {
-		// Tools-only, no schema. Reasoning enabled — tool selection benefits
-		// from it and there's no user-facing latency to protect here.
-		body := buildBody(s.Model, msgs, tools, false, false)
+		// Tools-only, no schema, reasoning DISABLED. A thinking model left to
+		// reason here tends to spend the turn emitting a <think> block and
+		// return no tool calls at all; with thinking off it goes straight to
+		// calling the write tools, which the worked example primes it for.
+		body := buildBody(s.Model, msgs, tools, false, true)
 		log.Printf("[chat] DEBUG memory round %d request: tools=%d messages=%d", iter, len(tools), len(msgs))
 		choice, _, status, err := callLLM(ctx, s, endpoint, body)
 		if err != nil {
@@ -353,7 +354,7 @@ func MemoryPass(ctx context.Context, s settings.AppSettings, history []Message, 
 			span.SetStatus(codes.Error, err.Error())
 			return err
 		}
-		log.Printf("[chat] DEBUG memory round %d response: toolCalls=%d contentLen=%d", iter, len(choice.ToolCalls), len(choice.Content))
+		log.Printf("[chat] DEBUG memory round %d response: toolCalls=%d content=%q", iter, len(choice.ToolCalls), truncate(choice.Content, 400))
 		if len(choice.ToolCalls) == 0 {
 			log.Printf("[chat] DEBUG memory pass complete after %d round(s) of tool calls", rounds)
 			span.SetAttributes(attribute.Int("llm.memory.rounds", rounds))
@@ -376,6 +377,51 @@ func MemoryPass(ctx context.Context, s settings.AppSettings, history []Message, 
 	log.Printf("[chat] DEBUG memory pass hit the %d-round cap", maxToolIterations)
 	span.SetAttributes(attribute.Int("llm.memory.rounds", rounds))
 	return nil
+}
+
+// memoryMessages builds the focused prompt for the memory pass. It deliberately
+// does NOT reuse the reply assembly: the full Diesel persona ("you are Diesel,
+// reply in 1–3 sentences, never break character") fights the extraction task
+// and pushes a small model into producing an in-character chat reply instead of
+// tool calls. Here the model sees only its current memory, a plain transcript
+// of the recent exchange, and the how-to instruction — nothing telling it to
+// converse.
+func memoryMessages(ctx context.Context, s settings.AppSettings, history []Message, kb KnowledgeBase) []wireMsg {
+	msgs := make([]wireMsg, 0, 3)
+
+	if graph, err := kb.GraphJSON(ctx); err == nil && graph != "" {
+		msgs = append(msgs, wireMsg{
+			Role:    RoleSystem,
+			Content: "Your current memory, as a knowledge graph in JSON:\n\n" + graph,
+		})
+	}
+
+	// Render the recent turns as a plain transcript so the model treats them as
+	// material to extract from, not a conversation to continue.
+	start := 0
+	if n := s.HistoryMessages; n > 0 && len(history) > n {
+		start = len(history) - n
+	}
+	var b strings.Builder
+	for _, m := range history[start:] {
+		switch m.Role {
+		case RoleUser:
+			b.WriteString("User: ")
+		case RoleAssistant:
+			b.WriteString("Diesel: ")
+		default:
+			continue
+		}
+		b.WriteString(strings.TrimSpace(m.Content))
+		b.WriteByte('\n')
+	}
+	msgs = append(msgs, wireMsg{
+		Role:    RoleSystem,
+		Content: "Conversation to review (most recent last):\n\n" + b.String(),
+	})
+
+	msgs = append(msgs, wireMsg{Role: RoleSystem, Content: memoryInstruction})
+	return msgs
 }
 
 // assembleMessages builds the outgoing message list: the date and persona

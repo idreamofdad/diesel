@@ -36,6 +36,7 @@ type wsAckEvent struct {
 	ClientID    string `json:"client_id"`
 	Status      string `json:"status,omitempty"`
 	InFlight    bool   `json:"in_flight"`
+	LLMActive   bool   `json:"llm_active"`
 	PortraitURL string `json:"portrait_url,omitempty"`
 }
 
@@ -74,10 +75,11 @@ func (m *Manager) handleWS(c *gin.Context) {
 	// requests the full history via REST when it's needed (cheap on
 	// loopback, and keeps the WS frame small).
 	ack := wsAckEvent{
-		Type:     "ack",
-		ClientID: clientID,
-		Status:   m.hub.LastStatus(),
-		InFlight: m.hub.InFlight(),
+		Type:      "ack",
+		ClientID:  clientID,
+		Status:    m.hub.LastStatus(),
+		InFlight:  m.hub.InFlight(),
+		LLMActive: m.hub.LLMActive(),
 	}
 	if id, png := m.hub.LatestPortrait(); id != "" && len(png) > 0 {
 		ack.PortraitURL = "/api/v1/portrait/" + id
