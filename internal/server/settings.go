@@ -33,6 +33,9 @@ func maskSettings(s settings.AppSettings) settings.AppSettings {
 	if s.TTSAPIKey != "" {
 		s.TTSAPIKey = secretMask
 	}
+	if s.ToolAPIKey != "" {
+		s.ToolAPIKey = secretMask
+	}
 	if s.ServerAuthToken != "" {
 		s.ServerAuthToken = secretMask
 	}
@@ -83,6 +86,9 @@ func mergeFromWeb(current, incoming settings.AppSettings) settings.AppSettings {
 	}
 	if incoming.TTSAPIKey == secretMask {
 		incoming.TTSAPIKey = current.TTSAPIKey
+	}
+	if incoming.ToolAPIKey == secretMask {
+		incoming.ToolAPIKey = current.ToolAPIKey
 	}
 	return incoming
 }
@@ -159,6 +165,12 @@ func resolveEndpoint(specific, saved settings.AppSettings, kind string) (string,
 		key := util.FirstNonEmpty(specific.TTSAPIKey,
 			util.FirstNonEmpty(specific.APIKey, saved.APIKey))
 		return ep, key
+	case "tool":
+		ep := util.FirstNonEmpty(specific.ToolEndpoint,
+			util.FirstNonEmpty(specific.APIEndpoint, saved.APIEndpoint))
+		key := util.FirstNonEmpty(specific.ToolAPIKey,
+			util.FirstNonEmpty(specific.APIKey, saved.APIKey))
+		return ep, key
 	}
 	return "", ""
 }
@@ -181,6 +193,7 @@ func (m *Manager) handleSettingsModels(c *gin.Context) {
 		APIEndpoint: req.Endpoint, APIKey: req.APIKey,
 		STTEndpoint: req.Endpoint, STTAPIKey: req.APIKey,
 		TTSEndpoint: req.Endpoint, TTSAPIKey: req.APIKey,
+		ToolEndpoint: req.Endpoint, ToolAPIKey: req.APIKey,
 	}
 	ep, key := resolveEndpoint(resolved, saved, req.Kind)
 
@@ -189,7 +202,7 @@ func (m *Manager) handleSettingsModels(c *gin.Context) {
 		err error
 	)
 	switch req.Kind {
-	case "llm":
+	case "llm", "tool":
 		ids, err = settings.FetchModels(ep, key)
 	case "stt":
 		ids, err = settings.FetchSTTModels(ep, key)
@@ -221,6 +234,8 @@ func savedKeyFor(s settings.AppSettings, kind string) string {
 		return util.FirstNonEmpty(s.STTAPIKey, s.APIKey)
 	case "tts":
 		return util.FirstNonEmpty(s.TTSAPIKey, s.APIKey)
+	case "tool":
+		return util.FirstNonEmpty(s.ToolAPIKey, s.APIKey)
 	}
 	return s.APIKey
 }
@@ -241,10 +256,11 @@ func (m *Manager) handleSettingsTest(c *gin.Context) {
 		APIEndpoint: req.Endpoint, APIKey: req.APIKey,
 		STTEndpoint: req.Endpoint, STTAPIKey: req.APIKey,
 		TTSEndpoint: req.Endpoint, TTSAPIKey: req.APIKey,
+		ToolEndpoint: req.Endpoint, ToolAPIKey: req.APIKey,
 	}
 	switch req.Kind {
-	case "llm":
-		ep, key := resolveEndpoint(resolved, saved, "llm")
+	case "llm", "tool":
+		ep, key := resolveEndpoint(resolved, saved, req.Kind)
 		c.JSON(http.StatusOK, gin.H{"status": settings.TestLLMConnection(ep, key)})
 	case "stt":
 		ep, key := resolveEndpoint(resolved, saved, "stt")
