@@ -330,6 +330,9 @@ export interface AppSettings {
   api_endpoint: string;
   api_key: string;
   model: string;
+  tool_endpoint: string;
+  tool_api_key: string;
+  tool_model: string;
   first_name: string;
   last_name: string;
   pet_name: string;
@@ -383,7 +386,7 @@ export async function saveSettings(s: AppSettings): Promise<AppSettings> {
 }
 
 export interface ProbeBody {
-  kind: 'llm' | 'stt' | 'tts' | 'image';
+  kind: 'llm' | 'stt' | 'tts' | 'tool' | 'image';
   endpoint: string;
   api_key?: string;
   model?: string;
