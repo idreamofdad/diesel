@@ -18,17 +18,19 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"log"
 	"os"
 	"strings"
 	"time"
 
 	"diesel/internal/audio"
+	"diesel/internal/logging"
 	"diesel/internal/settings"
 	"diesel/internal/storage"
 	"diesel/internal/tts"
 	"diesel/internal/util"
 )
+
+var logger = logging.Component("voicecheck")
 
 func main() {
 	dataDir := flag.String("data-dir", "", "directory for Diesel's data (defaults to the OS user config dir, same as the app)")
@@ -41,18 +43,18 @@ func main() {
 	// config carries over. Mirrors the backend injection in cmd/diesel.
 	dbPath, err := util.ConfigFilePath("diesel.db")
 	if err != nil {
-		log.Fatalf("config path: %v", err)
+		logger.Fatal().Err(err).Msg("config path")
 	}
 	store, err := storage.Open(dbPath)
 	if err != nil {
-		log.Fatalf("open storage: %v", err)
+		logger.Fatal().Err(err).Msg("open storage")
 	}
 	defer func() { _ = store.Close() }()
 	settings.SetBackend(
 		func() settings.AppSettings {
 			s, err := store.LoadSettings(context.Background())
 			if err != nil {
-				log.Printf("load settings: %v", err)
+				logger.Warn().Err(err).Msg("load settings")
 			}
 			return s
 		},
@@ -63,7 +65,7 @@ func main() {
 
 	ctx := context.Background()
 	if _, err := audio.Context(); err != nil {
-		log.Fatalf("audio backend: %v", err)
+		logger.Fatal().Err(err).Msg("audio backend")
 	}
 	printConfig()
 

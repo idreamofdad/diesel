@@ -4,7 +4,6 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"log"
 	"strings"
 	"time"
 
@@ -12,6 +11,7 @@ import (
 	"diesel/internal/chat"
 	"diesel/internal/hub"
 	"diesel/internal/knowledge"
+	"diesel/internal/logging"
 	"diesel/internal/matrix"
 	"diesel/internal/server"
 	"diesel/internal/settings"
@@ -44,6 +44,8 @@ const (
 // the busy-broadcast filter both know who "the desktop" is.
 const desktopOrigin = "desktop"
 
+var logger = logging.Component("diesel")
+
 // uiAsync runs work off the UI goroutine and delivers its result to onDone
 // back on the UI goroutine via fyne.Do. It's the GUI-side wrapper around
 // util.Async — util stays toolkit-agnostic (see internal/util), and the
@@ -66,13 +68,13 @@ func main() {
 	// trace-specific override) is set. Shutdown flushes in-flight spans on
 	// exit, bounded to 5 s so a stuck collector can't hang the app.
 	if shutdown, err := tracing.Init(context.Background()); err != nil {
-		log.Printf("[tracing] init failed: %v", err)
+		logger.Warn().Err(err).Msg("tracing init failed")
 	} else if shutdown != nil {
 		defer func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			if err := shutdown(ctx); err != nil {
-				log.Printf("[tracing] shutdown: %v", err)
+				logger.Warn().Err(err).Msg("tracing shutdown")
 			}
 		}()
 	}
@@ -82,11 +84,11 @@ func main() {
 	// anything reads settings or history.
 	dbPath, err := util.ConfigFilePath("diesel.db")
 	if err != nil {
-		log.Fatalf("[storage] config path: %v", err)
+		logger.Fatal().Err(err).Msg("storage config path")
 	}
 	store, err := storage.Open(dbPath)
 	if err != nil {
-		log.Fatalf("[storage] open: %v", err)
+		logger.Fatal().Err(err).Msg("storage open")
 	}
 	defer func() { _ = store.Close() }()
 	// Wire the settings package to the database. settings can't import storage
@@ -95,7 +97,7 @@ func main() {
 		func() settings.AppSettings {
 			s, err := store.LoadSettings(context.Background())
 			if err != nil {
-				log.Printf("[settings] load: %v", err)
+				logger.Warn().Err(err).Msg("settings load")
 			}
 			return s
 		},
@@ -116,7 +118,7 @@ func main() {
 	// on every settings Save just like the other managers.
 	knMgr, err := knowledge.New(store)
 	if err != nil {
-		log.Fatalf("[knowledge] init: %v", err)
+		logger.Fatal().Err(err).Msg("knowledge init")
 	}
 	defer knMgr.Stop()
 	h.SetKnowledge(knMgr.Bridge())

@@ -26,7 +26,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -34,6 +33,7 @@ import (
 
 	"diesel/internal/chat"
 	"diesel/internal/comfyui"
+	"diesel/internal/logging"
 	"diesel/internal/settings"
 	"diesel/internal/storage"
 	"diesel/internal/tracing"
@@ -46,6 +46,8 @@ import (
 
 // EventType discriminates the broadcast events. Wire-stable: change with
 // care — the web client switches on the string value.
+var logger = logging.Component("hub")
+
 type EventType string
 
 const (
@@ -236,7 +238,7 @@ func (h *Hub) Start(ctx context.Context) {
 	if s.SaveToDisk {
 		hist, err := h.store.LoadConversation(ctx)
 		if err != nil {
-			log.Printf("[hub] load conversation: %v", err)
+			logger.Error().Err(err).Msg("load conversation")
 		}
 		h.mu.Lock()
 		h.history = hist
@@ -402,7 +404,7 @@ func (h *Hub) Clear(ctx context.Context) error {
 	h.mu.Unlock()
 	if settings.Load().SaveToDisk {
 		if err := h.store.ClearConversation(ctx); err != nil {
-			log.Printf("[hub] clear conversation: %v", err)
+			logger.Error().Err(err).Msg("clear conversation")
 		}
 	}
 	h.broadcast(Event{Type: EventCleared, Timestamp: time.Now()})
@@ -493,7 +495,7 @@ func (h *Hub) runTurn(ctx context.Context, s settings.AppSettings, user chat.Mes
 	if !s.EnableKnowledge {
 		kb = nil
 	}
-	log.Printf("[hub] DEBUG turn %d: EnableKnowledge=%v kbWired=%v -> kb passed=%v",
+	logger.Debug().Msgf("turn %d: EnableKnowledge=%v kbWired=%v -> kb passed=%v",
 		turnID, s.EnableKnowledge, h.kb != nil, kb != nil)
 	h.llmEnter("Replying…")
 	reply, usage, err := chat.Completion(turnCtx, s, snapshot, kb)
@@ -541,7 +543,7 @@ func (h *Hub) runTurn(ctx context.Context, s settings.AppSettings, user chat.Mes
 		// Persist the completed exchange as one append — user first so it
 		// keeps the lower id, then the assistant reply.
 		if err := h.store.AppendMessages(turnCtx, user, assistant); err != nil {
-			log.Printf("[hub] persist conversation: %v", err)
+			logger.Error().Err(err).Msg("persist conversation")
 		}
 	}
 
@@ -587,7 +589,7 @@ func (h *Hub) updateMemory(ctx context.Context, s settings.AppSettings, history 
 	h.llmEnter("Remembering…")
 	defer h.llmExit()
 	if err := chat.MemoryPass(ctx, s, history, kb); err != nil {
-		log.Printf("[hub] memory pass (turn %d): %v", turnID, err)
+		logger.Error().Err(err).Msgf("memory pass (turn %d)", turnID)
 	}
 }
 

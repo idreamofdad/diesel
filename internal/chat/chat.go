@@ -5,13 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"regexp"
 	"strings"
 	"time"
 
 	"diesel/internal/comfyui"
+	"diesel/internal/logging"
 	"diesel/internal/settings"
 	"diesel/internal/tracing"
 	"diesel/internal/util"
@@ -23,6 +23,8 @@ import (
 
 // Chat message roles, matching the OpenAI-compatible /chat/completions
 // schema. Defined as constants so the spellings live in one place.
+var logger = logging.Component("chat")
+
 const (
 	RoleSystem    = "system"
 	RoleUser      = "user"
@@ -333,7 +335,7 @@ func MemoryPass(ctx context.Context, s settings.AppSettings, history []Message, 
 	}
 	tools := toolsToWire(defs)
 	if len(tools) == 0 {
-		log.Printf("[chat] DEBUG memory pass: no write tools advertised, skipping")
+		logger.Debug().Msg("memory pass: no write tools advertised, skipping")
 		return nil
 	}
 
@@ -346,35 +348,35 @@ func MemoryPass(ctx context.Context, s settings.AppSettings, history []Message, 
 		// return no tool calls at all; with thinking off it goes straight to
 		// calling the write tools, which the worked example primes it for.
 		body := buildBody(s.Model, msgs, tools, false, true)
-		log.Printf("[chat] DEBUG memory round %d request: tools=%d messages=%d", iter, len(tools), len(msgs))
+		logger.Debug().Msgf("memory round %d request: tools=%d messages=%d", iter, len(tools), len(msgs))
 		choice, _, status, err := callLLM(ctx, s, endpoint, body)
 		if err != nil {
-			log.Printf("[chat] DEBUG memory round %d error: status=%d err=%v", iter, status, err)
+			logger.Debug().Err(err).Msgf("memory round %d error: status=%d", iter, status)
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
 			return err
 		}
-		log.Printf("[chat] DEBUG memory round %d response: toolCalls=%d content=%q", iter, len(choice.ToolCalls), truncate(choice.Content, 400))
+		logger.Debug().Msgf("memory round %d response: toolCalls=%d content=%q", iter, len(choice.ToolCalls), truncate(choice.Content, 400))
 		if len(choice.ToolCalls) == 0 {
-			log.Printf("[chat] DEBUG memory pass complete after %d round(s) of tool calls", rounds)
+			logger.Debug().Msgf("memory pass complete after %d round(s) of tool calls", rounds)
 			span.SetAttributes(attribute.Int("llm.memory.rounds", rounds))
 			return nil
 		}
 		rounds++
 		msgs = append(msgs, wireMsg{Role: RoleAssistant, Content: choice.Content, ToolCalls: choice.ToolCalls})
 		for _, tc := range choice.ToolCalls {
-			log.Printf("[chat] DEBUG memory → tool call %q args=%s", tc.Function.Name, truncate(tc.Function.Arguments, 300))
+			logger.Debug().Msgf("memory → tool call %q args=%s", tc.Function.Name, truncate(tc.Function.Arguments, 300))
 			result, callErr := kb.Call(ctx, tc.Function.Name, json.RawMessage(tc.Function.Arguments))
 			if callErr != nil {
-				log.Printf("[chat] DEBUG memory ← tool %q TRANSPORT ERROR: %v", tc.Function.Name, callErr)
+				logger.Debug().Err(callErr).Msgf("memory ← tool %q TRANSPORT ERROR", tc.Function.Name)
 				result = "Error: " + callErr.Error()
 			} else {
-				log.Printf("[chat] DEBUG memory ← tool %q result=%s", tc.Function.Name, truncate(result, 300))
+				logger.Debug().Msgf("memory ← tool %q result=%s", tc.Function.Name, truncate(result, 300))
 			}
 			msgs = append(msgs, wireMsg{Role: RoleTool, ToolCallID: tc.ID, Content: result})
 		}
 	}
-	log.Printf("[chat] DEBUG memory pass hit the %d-round cap", maxToolIterations)
+	logger.Debug().Msgf("memory pass hit the %d-round cap", maxToolIterations)
 	span.SetAttributes(attribute.Int("llm.memory.rounds", rounds))
 	return nil
 }
@@ -442,11 +444,11 @@ func assembleMessages(ctx context.Context, s settings.AppSettings, history []Mes
 	// blob only grows; warn (don't truncate) once it gets large.
 	if kb != nil {
 		if graph, err := kb.GraphJSON(ctx); err != nil {
-			log.Printf("[chat] DEBUG knowledge graph unavailable for injection: %v", err)
+			logger.Debug().Err(err).Msg("knowledge graph unavailable for injection")
 		} else if graph != "" {
-			log.Printf("[chat] DEBUG injecting knowledge graph: %d bytes (~%d tokens)", len(graph), settings.EstimateTokens(graph))
+			logger.Debug().Msgf("injecting knowledge graph: %d bytes (~%d tokens)", len(graph), settings.EstimateTokens(graph))
 			if n := settings.EstimateTokens(graph); n > knowledgeTokenWarn {
-				log.Printf("[chat] knowledge graph is large (~%d tokens); consider pruning", n)
+				logger.Warn().Msgf("knowledge graph is large (~%d tokens); consider pruning", n)
 			}
 			msgs = append(msgs, wireMsg{
 				Role: RoleSystem,
@@ -561,7 +563,7 @@ func toolsToWire(defs []ToolDef) []map[string]any {
 		if len(d.Schema) > 0 {
 			var parsed map[string]any
 			if err := json.Unmarshal(d.Schema, &parsed); err != nil {
-				log.Printf("[chat] skipping tool %q with bad schema: %v", d.Name, err)
+				logger.Warn().Err(err).Msgf("skipping tool %q with bad schema", d.Name)
 				continue
 			}
 			params = parsed
@@ -629,18 +631,18 @@ func callLLM(ctx context.Context, s settings.AppSettings, endpoint string, body 
 	_, hasTools := body["tools"]
 	_, hasSchema := body["response_format"]
 	_, reasoningOff := body["reasoning_effort"]
-	log.Printf("[chat] DEBUG POST %s/chat/completions (tools=%v schema=%v reasoningDisabled=%v bodyBytes=%d)",
+	logger.Debug().Msgf("POST %s/chat/completions (tools=%v schema=%v reasoningDisabled=%v bodyBytes=%d)",
 		endpoint, hasTools, hasSchema, reasoningOff, len(raw))
 	client := tracing.HTTPClient(5 * time.Minute)
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Printf("[chat] DEBUG transport error: %v", err)
+		logger.Debug().Err(err).Msg("transport error")
 		return llmChoice{}, Usage{}, 0, err
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		bodyErr := util.HTTPStatusError(resp, 512)
-		log.Printf("[chat] DEBUG non-200: status=%d body=%v", resp.StatusCode, bodyErr)
+		logger.Debug().Msgf("non-200: status=%d body=%v", resp.StatusCode, bodyErr)
 		return llmChoice{}, Usage{}, resp.StatusCode, bodyErr
 	}
 

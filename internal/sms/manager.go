@@ -4,12 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"strings"
 	"sync"
 	"time"
 
 	"diesel/internal/hub"
+	"diesel/internal/logging"
 	"diesel/internal/settings"
 	"diesel/internal/storage"
 	"diesel/internal/tracing"
@@ -20,6 +20,8 @@ import (
 // dispatch loop can ignore non-SMS turns and the outbound reply knows
 // which number to text back.
 const subscriberID = "sms"
+
+var logger = logging.Component("sms")
 
 // originPrefix tags every Send origin so subscribers (us, downstream
 // listeners, the audio routing logic) can distinguish SMS-originated
@@ -252,7 +254,7 @@ func (m *Manager) pollLoop(ctx context.Context, client *Client, cfg config) {
 	for _, sid := range state.SeenSIDs {
 		seen.add(sid)
 	}
-	log.Printf("[sms] poll loop started: from=%s every=%ds cursor=%s seeded_seen=%d",
+	logger.Info().Msgf("poll loop started: from=%s every=%ds cursor=%s seeded_seen=%d",
 		cfg.from, cfg.pollSecs, state.Cursor.Format(time.RFC3339), len(state.SeenSIDs))
 
 	tick := time.NewTicker(time.Duration(cfg.pollSecs) * time.Second)
@@ -289,7 +291,7 @@ func (m *Manager) pollOnce(ctx context.Context, client *Client, cfg config, sinc
 		// occasionally returns 503 and the next tick recovers. Surface
 		// via status so the user notices a persistent failure.
 		m.setStatus("✗ Twilio poll: " + err.Error())
-		log.Printf("[sms] poll error: %v", err)
+		logger.Error().Err(err).Msg("poll error")
 		return
 	}
 	// Restore the steady-state status if a prior error left it set.
@@ -312,10 +314,10 @@ func (m *Manager) pollOnce(ctx context.Context, client *Client, cfg config, sinc
 		// replay this message on restart — worse than the rare case
 		// where we miss a reply (the user notices and retries).
 		if err := savePollState(ctx, m.store, pollState{Cursor: *since, SeenSIDs: seen.snapshot()}); err != nil {
-			log.Printf("[sms] save state: %v", err)
+			logger.Error().Err(err).Msg("save state")
 		}
 		if !cfg.isAllowed(msg.From) {
-			log.Printf("[sms] dropping message from non-allowed sender %s", msg.From)
+			logger.Warn().Msgf("dropping message from non-allowed sender %s", msg.From)
 			continue
 		}
 		body := strings.TrimSpace(msg.Body)
@@ -328,17 +330,17 @@ func (m *Manager) pollOnce(ctx context.Context, client *Client, cfg config, sinc
 		// from a goroutine kicked off by hub.Send, which can fire before
 		// the assignment after Send returns.
 		origin := originPrefix + msg.From
-		log.Printf("[sms] inbound from=%s sid=%s body=%q -> hub", msg.From, msg.SID, body)
+		logger.Info().Msgf("inbound from=%s sid=%s body=%q -> hub", msg.From, msg.SID, body)
 		if err := m.hub.Send(ctx, body, origin, false); err != nil {
 			// Hub busy: tell the user via SMS instead of silently
 			// dropping. They can resend once the in-flight turn ends.
 			if errors.Is(err, hub.ErrBusy) {
-				log.Printf("[sms] hub busy; replying to %s with retry hint", msg.From)
+				logger.Warn().Msgf("hub busy; replying to %s with retry hint", msg.From)
 				_, _ = client.Send(ctx, cfg.from, msg.From,
 					"Diesel is in the middle of another turn — try again in a moment.")
 				continue
 			}
-			log.Printf("[sms] hub.Send: %v", err)
+			logger.Error().Err(err).Msg("hub.Send")
 			continue
 		}
 	}
@@ -352,8 +354,8 @@ func (m *Manager) pollOnce(ctx context.Context, client *Client, cfg config, sinc
 // Concurrent SMS turns from different numbers are fine: the recipient
 // is encoded in Origin, so each event self-identifies its destination.
 func (m *Manager) dispatchLoop(ctx context.Context, sub *hub.Subscriber, client *Client, cfg config) {
-	log.Printf("[sms] dispatch loop started")
-	defer log.Printf("[sms] dispatch loop exiting")
+	logger.Info().Msg("dispatch loop started")
+	defer logger.Info().Msg("dispatch loop exiting")
 	for {
 		select {
 		case <-ctx.Done():
@@ -372,13 +374,13 @@ func (m *Manager) dispatchLoop(ctx context.Context, sub *hub.Subscriber, client 
 			switch ev.Type {
 			case hub.EventTurnComplete:
 				if ev.Assistant == nil {
-					log.Printf("[sms] turn_complete for %s but no assistant content", to)
+					logger.Warn().Msgf("turn_complete for %s but no assistant content", to)
 					continue
 				}
-				log.Printf("[sms] turn_complete for %s, replying with %d chars", to, len(ev.Assistant.Content))
+				logger.Info().Msgf("turn_complete for %s, replying with %d chars", to, len(ev.Assistant.Content))
 				m.replyTo(ctx, client, cfg, to, ev.Assistant.Content)
 			case hub.EventTurnError:
-				log.Printf("[sms] turn_error for %s: %s", to, ev.Error)
+				logger.Error().Msgf("turn_error for %s: %s", to, ev.Error)
 				m.replyTo(ctx, client, cfg, to,
 					"Sorry — something went wrong on Diesel's side: "+ev.Error)
 			}
@@ -399,17 +401,17 @@ func (m *Manager) dispatchLoop(ctx context.Context, sub *hub.Subscriber, client 
 // trial-account unverified destination.
 func (m *Manager) replyTo(ctx context.Context, client *Client, cfg config, to, body string) {
 	if to == "" || strings.TrimSpace(body) == "" {
-		log.Printf("[sms] replyTo skipped: to=%q body_len=%d", to, len(body))
+		logger.Warn().Msgf("replyTo skipped: to=%q body_len=%d", to, len(body))
 		return
 	}
 	msg, err := client.Send(ctx, cfg.from, to, body)
 	if err != nil {
-		log.Printf("[sms] send to %s failed: %v", to, err)
+		logger.Error().Err(err).Msgf("send to %s failed", to)
 		m.setStatus("✗ Twilio send: " + err.Error())
 		m.hub.SetStatus("✗ SMS send to " + to + " failed: " + err.Error())
 		return
 	}
-	log.Printf("[sms] queued reply to %s (sid=%s status=%s)", to, msg.SID, msg.Status)
+	logger.Info().Msgf("queued reply to %s (sid=%s status=%s)", to, msg.SID, msg.Status)
 	// Detached from the dispatch loop's ctx — a settings save during
 	// delivery shouldn't cancel the polling. Bounded by the ticker so
 	// it can't run forever.
@@ -430,31 +432,31 @@ func (m *Manager) trackDelivery(client *Client, sid, to string) {
 	for {
 		select {
 		case <-ctx.Done():
-			log.Printf("[sms] delivery status for sid=%s to=%s timed out (last poll didn't reach terminal state)", sid, to)
+			logger.Warn().Msgf("delivery status for sid=%s to=%s timed out (last poll didn't reach terminal state)", sid, to)
 			return
 		case <-tick.C:
 		}
 		msg, err := client.Fetch(ctx, sid)
 		if err != nil {
-			log.Printf("[sms] delivery status fetch sid=%s: %v", sid, err)
+			logger.Error().Err(err).Msgf("delivery status fetch sid=%s", sid)
 			continue
 		}
 		switch msg.Status {
 		case "delivered":
-			log.Printf("[sms] delivered sid=%s to=%s", sid, to)
+			logger.Info().Msgf("delivered sid=%s to=%s", sid, to)
 			return
 		case "sent":
 			// "sent" means the carrier accepted it but a delivery
 			// receipt hasn't come back. For most US carriers this is
 			// effectively success; keep polling briefly in case it
 			// flips to delivered/undelivered, but don't wait forever.
-			log.Printf("[sms] sent (no DLR yet) sid=%s to=%s", sid, to)
+			logger.Info().Msgf("sent (no DLR yet) sid=%s to=%s", sid, to)
 		case "failed", "undelivered":
 			errStr := msg.Status
 			if msg.ErrorCode != nil {
 				errStr = fmt.Sprintf("%s (err %d: %s)", msg.Status, *msg.ErrorCode, msg.ErrorMessage)
 			}
-			log.Printf("[sms] DELIVERY FAILED sid=%s to=%s: %s", sid, to, errStr)
+			logger.Error().Msgf("DELIVERY FAILED sid=%s to=%s: %s", sid, to, errStr)
 			m.setStatus("✗ SMS delivery: " + errStr)
 			m.hub.SetStatus("✗ SMS to " + to + " " + errStr)
 			return

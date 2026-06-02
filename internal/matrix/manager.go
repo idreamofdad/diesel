@@ -21,7 +21,6 @@ package matrix
 import (
 	"context"
 	"errors"
-	"log"
 	"net/http"
 	"strings"
 	"sync"
@@ -29,6 +28,7 @@ import (
 
 	"diesel/internal/audio"
 	"diesel/internal/hub"
+	"diesel/internal/logging"
 	"diesel/internal/settings"
 	"diesel/internal/storage"
 	"diesel/internal/util"
@@ -46,6 +46,8 @@ import (
 // under. The dispatch loop also watches turns from other origins so it
 // knows when a hub slot frees and the queue can drain.
 const subscriberID = "matrix"
+
+var logger = logging.Component("matrix")
 
 // originPrefix tags every hub Send origin "matrix:<room_id>" so the
 // dispatch loop can route the reply back and ignore non-Matrix turns.
@@ -287,20 +289,21 @@ func (m *Manager) run(ctx context.Context, sub *hub.Subscriber, cfg config) {
 	homeserverURL, err := m.resolveHomeserver(ctx, cfg.botMXID)
 	if err != nil {
 		m.setStatus("✗ Matrix: " + err.Error())
-		log.Printf("[matrix] homeserver discovery failed: %v", err)
+		logger.Error().Err(err).Msg("homeserver discovery failed")
 		return
 	}
 
 	client, err := mautrix.NewClient(homeserverURL, "", "")
 	if err != nil {
 		m.setStatus("✗ Matrix: " + err.Error())
-		log.Printf("[matrix] client init failed: %v", err)
+		logger.Error().Err(err).Msg("client init failed")
 		return
 	}
-	// mautrix-go logs verbosely via zerolog by default. Silence it; the
-	// bridge surfaces the same info via the stdlib log prefix used by
-	// the rest of Diesel.
-	client.Log = zerolog.Nop()
+	// mautrix-go logs verbosely via zerolog by default. Hand it a
+	// component=matrix sub-logger clamped to Warn so genuine failures
+	// (login, sync, decryption) surface, but its chatty info/debug stays
+	// hidden — DIESEL_LOG_LEVEL doesn't lift this floor.
+	client.Log = logger.Level(zerolog.WarnLevel)
 
 	// Pickle key persists once and is reused on every restart — a fresh
 	// key would render the existing Olm sessions undecryptable.
@@ -312,7 +315,7 @@ func (m *Manager) run(ctx context.Context, sub *hub.Subscriber, cfg config) {
 			return
 		}
 		if err := savePickleKey(ctx, m.store, pickleKey); err != nil {
-			log.Printf("[matrix] save pickle key: %v", err)
+			logger.Error().Err(err).Msg("save pickle key")
 		}
 	}
 
@@ -323,7 +326,7 @@ func (m *Manager) run(ctx context.Context, sub *hub.Subscriber, cfg config) {
 	cryptoDB, err := dbutil.NewWithDB(m.store.SQLDB(), "sqlite")
 	if err != nil {
 		m.setStatus("✗ Matrix: " + err.Error())
-		log.Printf("[matrix] dbutil: %v", err)
+		logger.Error().Err(err).Msg("dbutil")
 		return
 	}
 
@@ -337,7 +340,7 @@ func (m *Manager) run(ctx context.Context, sub *hub.Subscriber, cfg config) {
 	helper, err := cryptohelper.NewCryptoHelper(client, pickleKey, cryptoDB)
 	if err != nil {
 		m.setStatus("✗ Matrix: " + err.Error())
-		log.Printf("[matrix] crypto helper: %v", err)
+		logger.Error().Err(err).Msg("crypto helper")
 		return
 	}
 	helper.LoginAs = &mautrix.ReqLogin{
@@ -348,21 +351,21 @@ func (m *Manager) run(ctx context.Context, sub *hub.Subscriber, cfg config) {
 	}
 	if err := helper.Init(ctx); err != nil {
 		m.setStatus("✗ Matrix login: " + err.Error())
-		log.Printf("[matrix] login failed: %v", err)
+		logger.Error().Err(err).Msg("login failed")
 		return
 	}
 	client.Crypto = helper
 	defer func() {
 		if err := helper.Close(); err != nil {
-			log.Printf("[matrix] crypto helper close: %v", err)
+			logger.Warn().Err(err).Msg("crypto helper close")
 		}
 	}()
 	if err := saveHomeserverURL(ctx, m.store, homeserverURL); err != nil {
-		log.Printf("[matrix] save homeserver: %v", err)
+		logger.Error().Err(err).Msg("save homeserver")
 	}
 
 	m.setStatus("● Running — " + string(client.UserID))
-	log.Printf("[matrix] logged in as %s device=%s", client.UserID, client.DeviceID)
+	logger.Info().Msgf("logged in as %s device=%s", client.UserID, client.DeviceID)
 
 	// Skip backlog on first ever run: if the sync store has no
 	// next_batch yet, do a single sync with timeout=0 to learn the
@@ -370,7 +373,7 @@ func (m *Manager) run(ctx context.Context, sub *hub.Subscriber, cfg config) {
 	// token and resume normally — picking up messages that arrived
 	// while the app was down.
 	if err := m.skipBacklogIfFirstRun(ctx, client); err != nil {
-		log.Printf("[matrix] skip backlog: %v", err)
+		logger.Warn().Err(err).Msg("skip backlog")
 	}
 
 	go m.syncLoop(ctx, client)
@@ -419,7 +422,7 @@ func (m *Manager) skipBacklogIfFirstRun(ctx context.Context, client *mautrix.Cli
 	if resp == nil || resp.NextBatch == "" {
 		return nil
 	}
-	log.Printf("[matrix] first run — skipping backlog, starting at %s", resp.NextBatch)
+	logger.Info().Msgf("first run — skipping backlog, starting at %s", resp.NextBatch)
 	return client.Store.SaveNextBatch(ctx, client.UserID, resp.NextBatch)
 }
 
@@ -440,17 +443,17 @@ func (m *Manager) registerSyncHandlers(syncer *mautrix.DefaultSyncer, client *ma
 			return
 		}
 		if !cfg.isAllowed(evt.Sender) {
-			log.Printf("[matrix] ignoring invite to %s from non-allowed sender %s",
+			logger.Warn().Msgf("ignoring invite to %s from non-allowed sender %s",
 				evt.RoomID, evt.Sender)
 			return
 		}
 		if _, err := client.JoinRoomByID(ctx, evt.RoomID); err != nil {
-			log.Printf("[matrix] join %s: %v", evt.RoomID, err)
+			logger.Error().Err(err).Msgf("join %s", evt.RoomID)
 			return
 		}
-		log.Printf("[matrix] joined %s after invite from %s", evt.RoomID, evt.Sender)
+		logger.Info().Msgf("joined %s after invite from %s", evt.RoomID, evt.Sender)
 		if _, err := client.SendText(ctx, evt.RoomID, greeting); err != nil {
-			log.Printf("[matrix] greeting %s: %v", evt.RoomID, err)
+			logger.Warn().Err(err).Msgf("greeting %s", evt.RoomID)
 		}
 	})
 
@@ -467,12 +470,12 @@ func (m *Manager) registerSyncHandlers(syncer *mautrix.DefaultSyncer, client *ma
 // MUnknownToken pulls us out, which means the access token was
 // revoked — the user has to fix it in Settings.
 func (m *Manager) syncLoop(ctx context.Context, client *mautrix.Client) {
-	log.Printf("[matrix] sync loop started")
-	defer log.Printf("[matrix] sync loop exiting")
+	logger.Info().Msg("sync loop started")
+	defer logger.Info().Msg("sync loop exiting")
 	err := client.SyncWithContext(ctx)
 	if err != nil && !errors.Is(err, context.Canceled) {
 		m.setStatus("✗ Matrix sync: " + err.Error())
-		log.Printf("[matrix] sync error: %v", err)
+		logger.Error().Err(err).Msg("sync error")
 	}
 }
 
@@ -487,7 +490,7 @@ func (m *Manager) handleMessage(ctx context.Context, client *mautrix.Client, cfg
 		return
 	}
 	if !cfg.isAllowed(evt.Sender) {
-		log.Printf("[matrix] dropping message from non-allowed sender %s in %s",
+		logger.Warn().Msgf("dropping message from non-allowed sender %s in %s",
 			evt.Sender, evt.RoomID)
 		return
 	}
@@ -544,11 +547,11 @@ func (m *Manager) downloadAttachment(ctx context.Context, client *mautrix.Client
 func (m *Manager) enqueueGated(ctx context.Context, client *mautrix.Client, incoming chan<- pending, roomID id.RoomID, eventID id.EventID, text string) {
 	resp, err := client.JoinedMembers(ctx, roomID)
 	if err != nil {
-		log.Printf("[matrix] joined members for %s: %v", roomID, err)
+		logger.Error().Err(err).Msgf("joined members for %s", roomID)
 		return
 	}
 	if len(resp.Joined) != 2 {
-		log.Printf("[matrix] gating message in %s — joined=%d (only 2-member rooms allowed)",
+		logger.Warn().Msgf("gating message in %s — joined=%d (only 2-member rooms allowed)",
 			roomID, len(resp.Joined))
 		return
 	}
@@ -556,7 +559,7 @@ func (m *Manager) enqueueGated(ctx context.Context, client *mautrix.Client, inco
 	case incoming <- pending{roomID: roomID, eventID: eventID, text: text}:
 	case <-ctx.Done():
 	default:
-		log.Printf("[matrix] incoming buffer full — dropping message in %s", roomID)
+		logger.Warn().Msgf("incoming buffer full — dropping message in %s", roomID)
 	}
 }
 
@@ -567,14 +570,14 @@ func (m *Manager) transcribeAndEnqueue(client *mautrix.Client, incoming chan<- p
 	ctx := context.Background()
 	data, err := m.downloadAttachment(ctx, client, content)
 	if err != nil {
-		log.Printf("[matrix] download voice in %s: %v", evt.RoomID, err)
+		logger.Error().Err(err).Msgf("download voice in %s", evt.RoomID)
 		return
 	}
 	s := settings.Load()
 	ep := util.FirstNonEmpty(s.STTEndpoint, s.APIEndpoint)
 	key := util.FirstNonEmpty(s.STTAPIKey, s.APIKey)
 	if strings.TrimSpace(ep) == "" {
-		log.Printf("[matrix] voice received but no STT endpoint configured")
+		logger.Warn().Msg("voice received but no STT endpoint configured")
 		return
 	}
 	mime := "audio/ogg"
@@ -584,7 +587,7 @@ func (m *Manager) transcribeAndEnqueue(client *mautrix.Client, incoming chan<- p
 	m.hub.SetStatus("Transcribing Matrix voice note…")
 	text, err := audio.TranscribeBlob(ctx, ep, key, s.STTModel, "voice", mime, data)
 	if err != nil {
-		log.Printf("[matrix] transcribe: %v", err)
+		logger.Error().Err(err).Msg("transcribe")
 		m.hub.SetStatus("✗ Matrix voice transcription: " + err.Error())
 		return
 	}
@@ -593,7 +596,7 @@ func (m *Manager) transcribeAndEnqueue(client *mautrix.Client, incoming chan<- p
 		return
 	}
 	if _, err := client.SendText(ctx, evt.RoomID, "🎙 “"+text+"”"); err != nil {
-		log.Printf("[matrix] echo voice in %s: %v", evt.RoomID, err)
+		logger.Warn().Err(err).Msgf("echo voice in %s", evt.RoomID)
 	}
 	m.enqueueGated(ctx, client, incoming, evt.RoomID, evt.ID, text)
 }
@@ -604,8 +607,8 @@ func (m *Manager) transcribeAndEnqueue(client *mautrix.Client, incoming chan<- p
 // turn completing (any origin) frees a slot, so the queue is drained
 // then; a Matrix-originated turn completing sends the reply back.
 func (m *Manager) dispatchLoop(ctx context.Context, sub *hub.Subscriber, client *mautrix.Client, incoming <-chan pending) {
-	log.Printf("[matrix] dispatch loop started")
-	defer log.Printf("[matrix] dispatch loop exiting")
+	logger.Info().Msg("dispatch loop started")
+	defer logger.Info().Msg("dispatch loop exiting")
 
 	var queue []pending
 	// inFlight is whichever pending we most recently handed to the
@@ -639,7 +642,7 @@ func (m *Manager) dispatchLoop(ctx context.Context, sub *hub.Subscriber, client 
 			if errors.Is(err, hub.ErrBusy) {
 				return
 			}
-			log.Printf("[matrix] hub.Send for %s: %v", p.roomID, err)
+			logger.Error().Err(err).Msgf("hub.Send for %s", p.roomID)
 			queue = queue[1:]
 		}
 	}
@@ -653,10 +656,10 @@ func (m *Manager) dispatchLoop(ctx context.Context, sub *hub.Subscriber, client 
 				return
 			}
 			if len(queue) >= queueCap {
-				log.Printf("[matrix] queue full (%d) — rejecting %s", len(queue), p.roomID)
+				logger.Warn().Msgf("queue full (%d) — rejecting %s", len(queue), p.roomID)
 				if _, err := client.SendText(ctx, p.roomID,
 					"Diesel is backed up right now — try again in a moment."); err != nil {
-					log.Printf("[matrix] busy reply to %s: %v", p.roomID, err)
+					logger.Warn().Err(err).Msgf("busy reply to %s", p.roomID)
 				}
 				continue
 			}
@@ -693,7 +696,7 @@ func (m *Manager) dispatchLoop(ctx context.Context, sub *hub.Subscriber, client 
 							// reply lands so Diesel shows the same
 							// "seen" affordance Element gives a human.
 							if err := client.MarkRead(ctx, roomID, readUpTo); err != nil {
-								log.Printf("[matrix] mark read in %s: %v", roomID, err)
+								logger.Warn().Err(err).Msgf("mark read in %s", roomID)
 							}
 						}
 					}
@@ -709,7 +712,7 @@ func (m *Manager) dispatchLoop(ctx context.Context, sub *hub.Subscriber, client 
 					inFlight = nil
 					if _, err := client.SendText(ctx, roomID,
 						"Sorry — something went wrong on Diesel's side: "+ev.Error); err != nil {
-						log.Printf("[matrix] error reply to %s: %v", roomID, err)
+						logger.Warn().Err(err).Msgf("error reply to %s", roomID)
 					}
 				}
 				drain()
@@ -729,7 +732,7 @@ func (m *Manager) typingLoop(ctx context.Context, client *mautrix.Client, roomID
 			t = typingTimeout
 		}
 		if _, err := client.UserTyping(ctx, roomID, on, t); err != nil && !errors.Is(err, context.Canceled) {
-			log.Printf("[matrix] typing in %s: %v", roomID, err)
+			logger.Warn().Err(err).Msgf("typing in %s", roomID)
 		}
 	}
 	send(true)
@@ -763,7 +766,7 @@ func (m *Manager) sendReply(ctx context.Context, client *mautrix.Client, roomID 
 	}
 	resp, err := client.SendMessageEvent(ctx, roomID, event.EventMessage, content)
 	if err != nil {
-		log.Printf("[matrix] send reply to %s: %v", roomID, err)
+		logger.Error().Err(err).Msgf("send reply to %s", roomID)
 		m.setStatus("✗ Matrix send: " + err.Error())
 		m.hub.SetStatus("✗ Matrix send to " + string(roomID) + " failed: " + err.Error())
 		return ""
@@ -814,7 +817,7 @@ func TestConnection(botMXID, password string) string {
 	if err != nil {
 		return "✗ " + err.Error()
 	}
-	client.Log = zerolog.Nop()
+	client.Log = logger.Level(zerolog.WarnLevel)
 	client.Client = &http.Client{Timeout: 10 * time.Second}
 
 	resp, err := client.Login(ctx, &mautrix.ReqLogin{
@@ -833,7 +836,7 @@ func TestConnection(botMXID, password string) string {
 		return "✗ whoami: " + err.Error()
 	}
 	if _, err := client.Logout(ctx); err != nil {
-		log.Printf("[matrix] test connection logout: %v", err)
+		logger.Warn().Err(err).Msg("test connection logout")
 	}
 	return "✓ Connected as " + string(whoami.UserID) + " (device " + string(resp.DeviceID) + ")."
 }
