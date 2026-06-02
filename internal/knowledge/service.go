@@ -3,18 +3,20 @@ package knowledge
 import (
 	"context"
 	"fmt"
-	"log"
 	"net"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
 
+	"diesel/internal/logging"
 	"diesel/internal/settings"
 	"diesel/internal/storage"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
+
+var logger = logging.Component("knowledge")
 
 // Service owns the knowledge graph's MCP plumbing for the lifetime of the app:
 // one in-process server backed by SQLite, an always-on in-memory client
@@ -75,7 +77,7 @@ func New(store *storage.Store) (*Service, error) {
 		_ = serverSession.Close()
 		return nil, fmt.Errorf("knowledge: connect client session: %w", err)
 	}
-	log.Printf("[knowledge] DEBUG service initialized: in-memory MCP server+client sessions connected")
+	logger.Debug().Msg("service initialized: in-memory MCP server+client sessions connected")
 
 	return &Service{
 		store:         kn,
@@ -129,7 +131,7 @@ func (s *Service) Apply(set settings.AppSettings) string {
 	// is unaffected, so this only blocks the optional listener.
 	if cfg.token == "" {
 		s.status = "✗ set an auth token to enable the HTTP listener"
-		log.Printf("[knowledge] HTTP listener not started: auth token is empty")
+		logger.Warn().Msg("HTTP listener not started: auth token is empty")
 		return s.status
 	}
 
@@ -145,14 +147,14 @@ func (s *Service) Apply(set settings.AppSettings) string {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		s.status = "✗ " + err.Error()
-		log.Printf("[knowledge] listen %s: %v", addr, err)
+		logger.Error().Err(err).Msgf("listen %s", addr)
 		return s.status
 	}
 	s.httpSrv = srv
 	s.status = fmt.Sprintf("✓ Listening on %s", addr)
 	go func() {
 		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
-			log.Printf("[knowledge] http serve: %v", err)
+			logger.Error().Err(err).Msg("http serve")
 		}
 	}()
 	return s.status

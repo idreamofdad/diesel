@@ -11,7 +11,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"math/big"
 	"net/http"
 	"net/url"
@@ -19,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"diesel/internal/logging"
 	"diesel/internal/settings"
 	"diesel/internal/tracing"
 	"diesel/internal/util"
@@ -38,6 +38,8 @@ import (
 //
 //go:embed default_workflow.json
 var defaultWorkflow string
+
+var logger = logging.Component("comfyui")
 
 // workflowNode is one entry of a ComfyUI API-format graph. Inputs is left
 // as a free-form map because node schemas vary wildly and we only ever
@@ -358,7 +360,7 @@ func Generate(ctx context.Context, s settings.AppSettings, positive string, nake
 	// Stderr trace of what we're actually sending. Visible when Diesel is
 	// launched from a terminal, invisible in the packaged .app — useful
 	// for verifying the emotion splice without adding UI noise.
-	log.Printf("[comfyui] seed=%d naked=%t landscape=%t nudity_node=%q positive=%q negative=%q", seed, naked, landscape, nudityID, positive, negative)
+	logger.Info().Msgf("seed=%d naked=%t landscape=%t nudity_node=%q positive=%q negative=%q", seed, naked, landscape, nudityID, positive, negative)
 
 	// Connect the WebSocket *before* submitting the job so we don't miss
 	// early "executing" / "progress" events. The same client_id ties the

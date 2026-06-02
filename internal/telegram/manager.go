@@ -19,7 +19,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -28,6 +27,7 @@ import (
 
 	"diesel/internal/audio"
 	"diesel/internal/hub"
+	"diesel/internal/logging"
 	"diesel/internal/settings"
 	"diesel/internal/storage"
 	"diesel/internal/tracing"
@@ -40,6 +40,8 @@ import (
 // under. The dispatch loop also watches turns from other origins so it
 // knows when a hub slot frees and the queue can drain.
 const subscriberID = "telegram"
+
+var logger = logging.Component("telegram")
 
 // originPrefix tags every hub Send origin "telegram:<chat_id>" so the
 // dispatch loop can route the reply back and ignore non-Telegram turns.
@@ -243,11 +245,11 @@ func (m *Manager) run(ctx context.Context, sub *hub.Subscriber, cfg config) {
 	bot, err := tgbotapi.NewBotAPI(cfg.token)
 	if err != nil {
 		m.setStatus("✗ Telegram: " + err.Error())
-		log.Printf("[telegram] bot init failed: %v", err)
+		logger.Error().Err(err).Msg("bot init failed")
 		return
 	}
 	m.setStatus("● Running — @" + bot.Self.UserName)
-	log.Printf("[telegram] connected as @%s", bot.Self.UserName)
+	logger.Info().Msgf("connected as @%s", bot.Self.UserName)
 
 	// incoming hands finished inbound messages from the poll loop to the
 	// dispatch loop. Unbuffered: the dispatch loop classifies each one
@@ -271,15 +273,15 @@ func (m *Manager) pollLoop(ctx context.Context, bot *tgbotapi.BotAPI, cfg config
 			st.Offset = ups[len(ups)-1].UpdateID + 1
 		}
 		if err := saveState(ctx, m.store, st); err != nil {
-			log.Printf("[telegram] save state: %v", err)
+			logger.Error().Err(err).Msg("save state")
 		}
-		log.Printf("[telegram] first run — skipping backlog, starting at offset=%d", st.Offset)
+		logger.Info().Msgf("first run — skipping backlog, starting at offset=%d", st.Offset)
 	}
 
 	u := tgbotapi.NewUpdate(st.Offset)
 	u.Timeout = longPollTimeout
 	updates := bot.GetUpdatesChan(u)
-	log.Printf("[telegram] poll loop started: offset=%d", st.Offset)
+	logger.Info().Msgf("poll loop started: offset=%d", st.Offset)
 
 	for {
 		select {
@@ -304,7 +306,7 @@ func (m *Manager) pollLoop(ctx context.Context, bot *tgbotapi.BotAPI, cfg config
 // makes, and consistent with the in-memory (non-persisted) queue.
 func (m *Manager) handleUpdate(ctx context.Context, bot *tgbotapi.BotAPI, cfg config, up tgbotapi.Update, incoming chan<- pending) {
 	if err := saveState(ctx, m.store, state{Offset: up.UpdateID + 1}); err != nil {
-		log.Printf("[telegram] save state: %v", err)
+		logger.Error().Err(err).Msg("save state")
 	}
 
 	msg := up.Message
@@ -318,7 +320,7 @@ func (m *Manager) handleUpdate(ctx context.Context, bot *tgbotapi.BotAPI, cfg co
 		return
 	}
 	if msg.From == nil || !cfg.isAllowed(msg.From.UserName) {
-		log.Printf("[telegram] dropping message from non-allowed sender @%s (chat %d)",
+		logger.Warn().Msgf("dropping message from non-allowed sender @%s (chat %d)",
 			usernameOf(msg.From), chatIDOf(msg))
 		return
 	}
@@ -348,7 +350,7 @@ func (m *Manager) handleUpdate(ctx context.Context, bot *tgbotapi.BotAPI, cfg co
 		return
 	}
 
-	log.Printf("[telegram] inbound from @%s (chat %d): %q -> queue",
+	logger.Info().Msgf("inbound from @%s (chat %d): %q -> queue",
 		msg.From.UserName, msg.Chat.ID, text)
 	select {
 	case incoming <- pending{chatID: msg.Chat.ID, text: text}:
@@ -362,8 +364,8 @@ func (m *Manager) handleUpdate(ctx context.Context, bot *tgbotapi.BotAPI, cfg co
 // completing (any origin) frees a slot, so the queue is drained then;
 // a Telegram-originated turn completing sends the reply back.
 func (m *Manager) dispatchLoop(ctx context.Context, sub *hub.Subscriber, bot *tgbotapi.BotAPI, incoming <-chan pending) {
-	log.Printf("[telegram] dispatch loop started")
-	defer log.Printf("[telegram] dispatch loop exiting")
+	logger.Info().Msg("dispatch loop started")
+	defer logger.Info().Msg("dispatch loop exiting")
 
 	var queue []pending
 	var typingCancel context.CancelFunc
@@ -406,7 +408,7 @@ func (m *Manager) dispatchLoop(ctx context.Context, sub *hub.Subscriber, bot *tg
 			}
 			// Anything else (e.g. empty message) won't fix itself by
 			// retrying — drop it and move on.
-			log.Printf("[telegram] hub.Send for chat %d: %v", p.chatID, err)
+			logger.Error().Err(err).Msgf("hub.Send for chat %d", p.chatID)
 			queue = queue[1:]
 		}
 	}
@@ -420,7 +422,7 @@ func (m *Manager) dispatchLoop(ctx context.Context, sub *hub.Subscriber, bot *tg
 				return
 			}
 			if len(queue) >= queueCap {
-				log.Printf("[telegram] queue full (%d) — rejecting chat %d", len(queue), p.chatID)
+				logger.Warn().Msgf("queue full (%d) — rejecting chat %d", len(queue), p.chatID)
 				m.send(bot, p.chatID,
 					"Diesel is backed up right now — try again in a moment.")
 				continue
@@ -501,7 +503,7 @@ func (m *Manager) dispatchLoop(ctx context.Context, sub *hub.Subscriber, bot *tg
 func (m *Manager) typingLoop(ctx context.Context, bot *tgbotapi.BotAPI, chatID int64) {
 	send := func() {
 		if _, err := bot.Request(tgbotapi.NewChatAction(chatID, tgbotapi.ChatTyping)); err != nil {
-			log.Printf("[telegram] chat action for %d: %v", chatID, err)
+			logger.Warn().Err(err).Msgf("chat action for %d", chatID)
 		}
 	}
 	send()
@@ -527,25 +529,25 @@ func (m *Manager) transcribe(ctx context.Context, bot *tgbotapi.BotAPI, fileID s
 	ep := util.FirstNonEmpty(s.STTEndpoint, s.APIEndpoint)
 	key := util.FirstNonEmpty(s.STTAPIKey, s.APIKey)
 	if strings.TrimSpace(ep) == "" {
-		log.Printf("[telegram] voice note received but no STT endpoint configured")
+		logger.Warn().Msg("voice note received but no STT endpoint configured")
 		return "", false
 	}
 
 	url, err := bot.GetFileDirectURL(fileID)
 	if err != nil {
-		log.Printf("[telegram] get file URL: %v", err)
+		logger.Error().Err(err).Msg("get file URL")
 		return "", false
 	}
 	data, err := downloadFile(ctx, url)
 	if err != nil {
-		log.Printf("[telegram] download voice note: %v", err)
+		logger.Error().Err(err).Msg("download voice note")
 		return "", false
 	}
 
 	m.hub.SetStatus("Transcribing Telegram voice note…")
 	text, err := audio.TranscribeBlob(ctx, ep, key, s.STTModel, "voice.ogg", "audio/ogg", data)
 	if err != nil {
-		log.Printf("[telegram] transcribe: %v", err)
+		logger.Error().Err(err).Msg("transcribe")
 		m.hub.SetStatus("✗ Telegram voice transcription: " + err.Error())
 		return "", false
 	}
@@ -604,7 +606,7 @@ func (m *Manager) send(bot *tgbotapi.BotAPI, chatID int64, text string) int {
 	for _, chunk := range splitMessage(text) {
 		msg, err := bot.Send(tgbotapi.NewMessage(chatID, chunk))
 		if err != nil {
-			log.Printf("[telegram] send to chat %d: %v", chatID, err)
+			logger.Error().Err(err).Msgf("send to chat %d", chatID)
 			m.setStatus("✗ Telegram send: " + err.Error())
 			m.hub.SetStatus(fmt.Sprintf("✗ Telegram send to chat %d failed: %s", chatID, err))
 			return firstID
@@ -627,7 +629,7 @@ func (m *Manager) sendPortrait(bot *tgbotapi.BotAPI, ref turnRef, portraitURL st
 	if !ok || len(data) == 0 {
 		// The cache is small (8 entries); a slow turn could see its
 		// portrait evicted before this fires. Rare — just skip it.
-		log.Printf("[telegram] portrait %q not in hub cache", id)
+		logger.Warn().Msgf("portrait %q not in hub cache", id)
 		return 0, false
 	}
 	photo := tgbotapi.NewPhoto(ref.chatID, tgbotapi.FileBytes{Name: "portrait.png", Bytes: data})
@@ -636,7 +638,7 @@ func (m *Manager) sendPortrait(bot *tgbotapi.BotAPI, ref turnRef, portraitURL st
 	photo.ReplyToMessageID = ref.textMsgID
 	msg, err := bot.Send(photo)
 	if err != nil {
-		log.Printf("[telegram] send portrait to chat %d: %v", ref.chatID, err)
+		logger.Error().Err(err).Msgf("send portrait to chat %d", ref.chatID)
 		m.setStatus("✗ Telegram portrait: " + err.Error())
 		return 0, false
 	}
@@ -653,7 +655,7 @@ func (m *Manager) deletePortrait(bot *tgbotapi.BotAPI, lastPortrait map[int64]in
 	}
 	delete(lastPortrait, chatID)
 	if _, err := bot.Request(tgbotapi.NewDeleteMessage(chatID, msgID)); err != nil {
-		log.Printf("[telegram] delete portrait %d in chat %d: %v", msgID, chatID, err)
+		logger.Warn().Err(err).Msgf("delete portrait %d in chat %d", msgID, chatID)
 	}
 }
 
@@ -662,7 +664,7 @@ func (m *Manager) deletePortrait(bot *tgbotapi.BotAPI, lastPortrait map[int64]in
 // Best-effort: a failed write is logged, not fatal.
 func (m *Manager) persistPortraits(ctx context.Context, lastPortrait map[int64]int) {
 	if err := savePortraitState(ctx, m.store, lastPortrait); err != nil {
-		log.Printf("[telegram] save portrait state: %v", err)
+		logger.Error().Err(err).Msg("save portrait state")
 	}
 }
 

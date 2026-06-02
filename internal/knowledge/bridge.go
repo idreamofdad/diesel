@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"strings"
 
 	"diesel/internal/chat"
@@ -55,10 +54,10 @@ func (b *Bridge) GraphJSON(ctx context.Context) (string, error) {
 func (b *Bridge) Tools(ctx context.Context) ([]chat.ToolDef, error) {
 	res, err := b.session.ListTools(ctx, nil)
 	if err != nil {
-		log.Printf("[knowledge] DEBUG ListTools failed: %v", err)
+		logger.Debug().Err(err).Msg("ListTools failed")
 		return nil, fmt.Errorf("knowledge: list tools: %w", err)
 	}
-	log.Printf("[knowledge] DEBUG ListTools returned %d tools", len(res.Tools))
+	logger.Debug().Msgf("ListTools returned %d tools", len(res.Tools))
 	defs := make([]chat.ToolDef, 0, len(res.Tools))
 	for _, t := range res.Tools {
 		if modelHiddenTools[t.Name] {
@@ -76,7 +75,7 @@ func (b *Bridge) Tools(ctx context.Context) ([]chat.ToolDef, error) {
 			Schema:      schema,
 		})
 	}
-	log.Printf("[knowledge] DEBUG advertising %d write tools to the model (read-only tools hidden)", len(defs))
+	logger.Debug().Msgf("advertising %d write tools to the model (read-only tools hidden)", len(defs))
 	return defs, nil
 }
 
@@ -84,14 +83,14 @@ func (b *Bridge) Tools(ctx context.Context) ([]chat.ToolDef, error) {
 // (IsError) is returned as readable text prefixed with "Error:" so the model
 // can recover; only transport failures surface as a Go error.
 func (b *Bridge) Call(ctx context.Context, name string, args json.RawMessage) (string, error) {
-	log.Printf("[knowledge] DEBUG CallTool %q args=%s", name, string(args))
+	logger.Debug().Msgf("CallTool %q args=%s", name, string(args))
 	res, err := b.session.CallTool(ctx, &mcp.CallToolParams{Name: name, Arguments: args})
 	if err != nil {
-		log.Printf("[knowledge] DEBUG CallTool %q transport error: %v", name, err)
+		logger.Debug().Err(err).Msgf("CallTool %q transport error", name)
 		return "", fmt.Errorf("knowledge: call %q: %w", name, err)
 	}
 	text := textOf(res)
-	log.Printf("[knowledge] DEBUG CallTool %q isError=%v resultLen=%d", name, res.IsError, len(text))
+	logger.Debug().Msgf("CallTool %q isError=%v resultLen=%d", name, res.IsError, len(text))
 	if res.IsError {
 		return "Error: " + text, nil
 	}
