@@ -132,6 +132,19 @@ func showSettingsDialog(win fyne.Window, srvMgr *server.Manager, smsMgr *sms.Man
 	contextLabel := widget.NewLabel("—")
 	historyMessages := newIntEntry(current.HistoryMessages, 0, 500)
 
+	// ─── Tool model ──────────────────────────────────────────────────────────
+	// A separate (smaller, faster) model for the background memory pass — the
+	// only tool-calling path. Each field falls back to its LLM counterpart when
+	// blank, same shape as STT/TTS.
+	toolEndpoint := widget.NewEntry()
+	toolEndpoint.SetText(current.ToolEndpoint)
+	toolEndpoint.SetPlaceHolder("(falls back to API endpoint)")
+	toolAPIKey := widget.NewPasswordEntry()
+	toolAPIKey.SetText(current.ToolAPIKey)
+	toolAPIKey.SetPlaceHolder("(falls back to API key)")
+	toolModel := widget.NewSelectEntry([]string{})
+	toolModel.SetPlaceHolder("(falls back to main model)")
+
 	// ─── STT ───────────────────────────────────────────────────────────────
 	sttEndpoint := widget.NewEntry()
 	sttEndpoint.SetText(current.STTEndpoint)
@@ -269,6 +282,13 @@ func showSettingsDialog(win fyne.Window, srvMgr *server.Manager, smsMgr *sms.Man
 			return settings.FetchModels(endpoint.Text, apiKey.Text)
 		})
 	}
+	loadToolModels := func() {
+		ep := util.FirstNonEmpty(toolEndpoint.Text, endpoint.Text)
+		key := util.FirstNonEmpty(toolAPIKey.Text, apiKey.Text)
+		populateModelSelect(toolModel, current.ToolModel, func() ([]string, error) {
+			return settings.FetchModels(ep, key)
+		})
+	}
 	loadSTTModels := func() {
 		ep := util.FirstNonEmpty(sttEndpoint.Text, endpoint.Text)
 		key := util.FirstNonEmpty(sttAPIKey.Text, apiKey.Text)
@@ -304,14 +324,20 @@ func showSettingsDialog(win fyne.Window, srvMgr *server.Manager, smsMgr *sms.Man
 	// Debounced live refreshes as the user types — same 400 ms cadence and
 	// cross-field fallback rules as the Qt dialog.
 	dCtx := debounce(400*time.Millisecond, refreshContext)
+	dTool := debounce(400*time.Millisecond, loadToolModels)
 	dSTT := debounce(400*time.Millisecond, loadSTTModels)
 	dTTS := debounce(400*time.Millisecond, loadTTSModels)
 	model.OnChanged = func(string) { dCtx() }
+	toolEndpoint.OnChanged = func(string) { dTool() }
+	toolAPIKey.OnChanged = func(string) { dTool() }
 	sttEndpoint.OnChanged = func(string) { dSTT() }
 	sttAPIKey.OnChanged = func(string) { dSTT() }
 	ttsEndpoint.OnChanged = func(string) { dTTS() }
 	ttsAPIKey.OnChanged = func(string) { dTTS() }
 	endpoint.OnChanged = func(string) {
+		if strings.TrimSpace(toolEndpoint.Text) == "" {
+			dTool()
+		}
 		if strings.TrimSpace(sttEndpoint.Text) == "" {
 			dSTT()
 		}
@@ -321,6 +347,9 @@ func showSettingsDialog(win fyne.Window, srvMgr *server.Manager, smsMgr *sms.Man
 		dCtx()
 	}
 	apiKey.OnChanged = func(string) {
+		if strings.TrimSpace(toolAPIKey.Text) == "" {
+			dTool()
+		}
 		if strings.TrimSpace(sttAPIKey.Text) == "" {
 			dSTT()
 		}
@@ -340,11 +369,31 @@ func showSettingsDialog(win fyne.Window, srvMgr *server.Manager, smsMgr *sms.Man
 			llmTestStatus.SetText(result)
 			if strings.HasPrefix(result, "✓") {
 				loadModels()
+				loadToolModels()
 				loadSTTModels()
 				loadTTSModels()
 				refreshContext()
 			}
 			llmTestBtn.Enable()
+		})
+	}
+
+	toolTestRow, toolTestBtn, toolTestStatus := makeTestRow("Test connection")
+	toolTestBtn.OnTapped = func() {
+		ep := util.FirstNonEmpty(toolEndpoint.Text, endpoint.Text)
+		key := util.FirstNonEmpty(toolAPIKey.Text, apiKey.Text)
+		if strings.TrimSpace(ep) == "" {
+			toolTestStatus.SetText("✗ No endpoint configured.")
+			return
+		}
+		toolTestBtn.Disable()
+		toolTestStatus.SetText("Testing…")
+		uiAsync(func() string { return settings.TestLLMConnection(ep, key) }, func(result string) {
+			toolTestStatus.SetText(result)
+			if strings.HasPrefix(result, "✓") {
+				loadToolModels()
+			}
+			toolTestBtn.Enable()
 		})
 	}
 

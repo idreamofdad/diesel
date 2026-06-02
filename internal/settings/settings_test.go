@@ -35,6 +35,44 @@ func TestIdentityConfigured(t *testing.T) {
 	}
 }
 
+func TestResolveToolModel(t *testing.T) {
+	cases := []struct {
+		name                       string
+		s                          AppSettings
+		wantEP, wantKey, wantModel string
+	}{
+		{
+			name:      "all tool fields blank fall through to main",
+			s:         AppSettings{APIEndpoint: "http://main", APIKey: "k", Model: "big"},
+			wantEP:    "http://main",
+			wantKey:   "k",
+			wantModel: "big",
+		},
+		{
+			name:      "all tool fields set override main",
+			s:         AppSettings{APIEndpoint: "http://main", APIKey: "k", Model: "big", ToolEndpoint: "http://tool", ToolAPIKey: "tk", ToolModel: "small"},
+			wantEP:    "http://tool",
+			wantKey:   "tk",
+			wantModel: "small",
+		},
+		{
+			name:      "fields fall through independently",
+			s:         AppSettings{APIEndpoint: "http://main", APIKey: "k", Model: "big", ToolModel: "small"},
+			wantEP:    "http://main",
+			wantKey:   "k",
+			wantModel: "small",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ep, key, model := tc.s.ResolveToolModel()
+			assert.Equal(t, tc.wantEP, ep)
+			assert.Equal(t, tc.wantKey, key)
+			assert.Equal(t, tc.wantModel, model)
+		})
+	}
+}
+
 func TestRenderSystemPrompt(t *testing.T) {
 	s := AppSettings{FirstName: "Sentinel-First", LastName: "Sentinel-Last", PetName: "Sentinel-Pet"}
 	out := RenderSystemPrompt(s)
