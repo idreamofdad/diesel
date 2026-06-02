@@ -79,6 +79,17 @@ type AppSettings struct {
 	APIEndpoint string `json:"api_endpoint"`
 	APIKey      string `json:"api_key"`
 	Model       string `json:"model"`
+	// Tool model: a separate (typically smaller, faster) model used only for
+	// the background memory pass — the one place Diesel calls tools. Splitting
+	// it off the main reply model lets the extraction run on its own endpoint so
+	// it never contends with the persona reply for the same GPU, and so the
+	// graph it writes is ready sooner for the next turn. Each field falls
+	// through independently when blank: ToolEndpoint→APIEndpoint,
+	// ToolAPIKey→APIKey, ToolModel→Model. An all-blank config therefore behaves
+	// exactly like the single-model setup. See ResolveToolModel.
+	ToolEndpoint string `json:"tool_endpoint"`
+	ToolAPIKey   string `json:"tool_api_key"`
+	ToolModel    string `json:"tool_model"`
 	// FirstName, LastName, and PetName are the only user-side identity
 	// the hardcoded persona prompt parameterizes: everything else about
 	// Diesel and the relationship is fixed in the const. Empty by default
@@ -291,6 +302,17 @@ func RenderSystemPrompt(s AppSettings) string {
 		"{last_name}", s.LastName,
 		"{pet_name}", s.PetName,
 	).Replace(systemPrompt)
+}
+
+// ResolveToolModel returns the endpoint, API key, and model the memory pass
+// should use, applying the independent fall-through described on the Tool*
+// fields: a blank Tool* value defers to its main-model counterpart. The
+// returned settings are what chat.MemoryPass actually dials, so a fresh install
+// (all Tool* blank) transparently reuses the main model.
+func (s AppSettings) ResolveToolModel() (endpoint, apiKey, model string) {
+	return util.FirstNonEmpty(s.ToolEndpoint, s.APIEndpoint),
+		util.FirstNonEmpty(s.ToolAPIKey, s.APIKey),
+		util.FirstNonEmpty(s.ToolModel, s.Model)
 }
 
 // modelEntry is one row from an OpenAI-compatible /models response.

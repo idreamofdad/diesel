@@ -319,13 +319,21 @@ func MemoryPass(ctx context.Context, s settings.AppSettings, history []Message, 
 	if kb == nil {
 		return nil
 	}
+	// The memory pass is the only tool-calling path, so it runs on the
+	// (optionally separate) tool model. ResolveToolModel applies the blank
+	// fall-through to the main model, so this is the main model unless the user
+	// configured a distinct one. We override s with the resolved endpoint/key/
+	// model so callLLM's auth header and buildBody's model both pick it up.
+	toolEndpoint, toolKey, toolModel := s.ResolveToolModel()
+	s.APIEndpoint, s.APIKey, s.Model = toolEndpoint, toolKey, toolModel
+
 	ctx, span := tracing.StartSpan(ctx, "llm.memory",
-		attribute.String("llm.model", s.Model),
+		attribute.String("llm.model", toolModel),
 	)
 	defer span.End()
 
-	endpoint := util.NormalizeEndpoint(s.APIEndpoint)
-	if endpoint == "" || strings.TrimSpace(s.Model) == "" {
+	endpoint := util.NormalizeEndpoint(toolEndpoint)
+	if endpoint == "" || strings.TrimSpace(toolModel) == "" {
 		return fmt.Errorf("memory: no endpoint or model configured")
 	}
 

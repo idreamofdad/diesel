@@ -489,6 +489,13 @@ func showSettingsDialog(win fyne.Window, srvMgr *server.Manager, smsMgr *sms.Man
 		widget.NewFormItem("Message history", historyMessages),
 		full(llmTestRow),
 	)
+	toolTab := tab(
+		widget.NewFormItem("", widget.NewLabel("A smaller, faster model for the background\nmemory pass — the only step that calls tools.\nLeave blank to reuse the main LLM.")),
+		widget.NewFormItem("Endpoint", toolEndpoint),
+		widget.NewFormItem("API key", toolAPIKey),
+		widget.NewFormItem("Model", toolModel),
+		full(toolTestRow),
+	)
 	sttTab := tab(
 		widget.NewFormItem("Endpoint", sttEndpoint),
 		widget.NewFormItem("API key", sttAPIKey),
@@ -558,6 +565,7 @@ func showSettingsDialog(win fyne.Window, srvMgr *server.Manager, smsMgr *sms.Man
 
 	tabs := container.NewAppTabs(
 		container.NewTabItem("LLM", llmTab),
+		container.NewTabItem("Tool Model", toolTab),
 		container.NewTabItem("Speech-to-Text", sttTab),
 		container.NewTabItem("Text-to-Speech", ttsTab),
 		container.NewTabItem("Image Generation", imgTab),
@@ -596,6 +604,9 @@ func showSettingsDialog(win fyne.Window, srvMgr *server.Manager, smsMgr *sms.Man
 			APIEndpoint:             endpoint.Text,
 			APIKey:                  apiKey.Text,
 			Model:                   model.Text,
+			ToolEndpoint:            toolEndpoint.Text,
+			ToolAPIKey:              toolAPIKey.Text,
+			ToolModel:               toolModel.Text,
 			FirstName:               firstName.Text,
 			LastName:                lastName.Text,
 			PetName:                 petName.Text,
@@ -666,6 +677,7 @@ func showSettingsDialog(win fyne.Window, srvMgr *server.Manager, smsMgr *sms.Man
 
 	// Initial population, matching the Qt dialog's open-time fetches.
 	loadModels()
+	loadToolModels()
 	loadSTTModels()
 	loadTTSModels()
 	refreshContext()
