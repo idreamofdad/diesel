@@ -275,6 +275,12 @@ func Completion(ctx context.Context, s settings.AppSettings, history []Message, 
 	return finalizeReply(choice.Content, history, span), usage, nil
 }
 
+// memoryHistoryMessages caps how many recent messages the memory pass reviews.
+// It's deliberately independent of s.HistoryMessages (which can run to hundreds
+// of turns for the chat itself): the extractor only needs the recent tail to
+// pull durable facts from, and a fixed, modest window keeps the pass cheap.
+const memoryHistoryMessages = 20
+
 // memoryInstruction steers the second-pass model: look at the conversation it
 // just had and record anything durable through the write tools. It's appended
 // as the final system message of the memory pass, after the persona + graph +
@@ -283,7 +289,7 @@ func Completion(ctx context.Context, s settings.AppSettings, history []Message, 
 // reliably than abstract rules.
 const memoryInstruction = `# Updating your memory
 
-You are now updating your own long-term memory based on the conversation above. This is a background step — do NOT write a chat reply, only call tools.
+You are now updating your own long-term memory based on the conversation above. This is a background step — do NOT write a chat reply, do NOT explain or reason out loud, just call the tools. Go straight to the right tool calls; the worked example below is all the guidance you need.
 
 Your memory is a knowledge graph of three things:
 - ENTITIES — the people, animals, places, and things you know. Each has a unique name and a type (e.g. name "Tyr Mactire", type "person"; name "Beckett", type "cat").
@@ -294,18 +300,23 @@ You have these tools:
 - create_entities — add new entities. Pass each as {name, entityType, observations:[]}. Re-using a name just merges in new observations, so it's safe.
 - add_observations — attach new facts to an entity that already exists. Pass {entityName, contents:[...]}.
 - create_relations — link two entities that BOTH already exist. Pass {from, to, relationType}. If an endpoint doesn't exist yet, create it first or the call is rejected.
-- delete_entities / delete_observations / delete_relations — remove things that are now wrong or contradicted.
+- delete_entities / delete_observations / delete_relations — remove things that are now wrong, irrelevant, or contradicted.
 
 Worked example — if the user said "I'm Tyr Mactire, I work at McDonalds, and I have a cat named Beckett", you would call:
 1. create_entities: [{name:"Tyr Mactire", entityType:"person", observations:["works at McDonalds"]}, {name:"Beckett", entityType:"cat", observations:[]}]
 2. create_relations: [{from:"Tyr Mactire", to:"Beckett", relationType:"owns"}]
 
 Rules:
+- Don't think step by step or narrate what you're doing — read the conversation, then act with tool calls directly.
 - Only record DURABLE facts (names, jobs, relationships, pets, where someone lives, lasting preferences). Ignore small talk and passing moods.
 - Check the graph above first — don't re-create entities or re-add observations that are already there.
 - Create entities before relating them.
 - If a new fact contradicts an old one, delete the stale piece and add the correct one.
-- If nothing new and durable came up, call no tools at all.`
+- If nothing new and durable came up, call no tools at all.
+
+Understandings:
+- The user may call you "dad" or "daddy" — that's the role you've grown into, not a literal family relationship.
+`
 
 // MemoryPass is the second pass of the turn: after the user already has their
 // reply, the model gets the conversation plus its current memory and a set of
@@ -347,7 +358,7 @@ func MemoryPass(ctx context.Context, s settings.AppSettings, history []Message, 
 		return nil
 	}
 
-	msgs := memoryMessages(ctx, s, history, kb)
+	msgs := memoryMessages(ctx, history, kb)
 
 	rounds := 0
 	for iter := 0; iter < maxToolIterations; iter++ {
@@ -396,7 +407,7 @@ func MemoryPass(ctx context.Context, s settings.AppSettings, history []Message, 
 // tool calls. Here the model sees only its current memory, a plain transcript
 // of the recent exchange, and the how-to instruction — nothing telling it to
 // converse.
-func memoryMessages(ctx context.Context, s settings.AppSettings, history []Message, kb KnowledgeBase) []wireMsg {
+func memoryMessages(ctx context.Context, history []Message, kb KnowledgeBase) []wireMsg {
 	msgs := make([]wireMsg, 0, 3)
 
 	if graph, err := kb.GraphJSON(ctx); err == nil && graph != "" {
@@ -409,8 +420,8 @@ func memoryMessages(ctx context.Context, s settings.AppSettings, history []Messa
 	// Render the recent turns as a plain transcript so the model treats them as
 	// material to extract from, not a conversation to continue.
 	start := 0
-	if n := s.HistoryMessages; n > 0 && len(history) > n {
-		start = len(history) - n
+	if len(history) > memoryHistoryMessages {
+		start = len(history) - memoryHistoryMessages
 	}
 	var b strings.Builder
 	for _, m := range history[start:] {
