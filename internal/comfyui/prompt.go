@@ -35,7 +35,7 @@ const ImageNudity = `naked, small penis, flaccid, uncut, uncircumcised, foreskin
 // reject feminine tags) with the Illustrious quality-failure baseline
 // (lo-res, deformed anatomy, watermarks, etc.). Read directly by
 // Generate.
-const ImageNegativePrompt = `woman, girl, shirt logo, feminine, wide hips, worst quality, low quality, lowres, bad anatomy, bad hands, extra fingers, deformed, blurry, watermark, signature, text, jpeg artifacts, (ponytail)`
+const ImageNegativePrompt = `woman, girl, shirt logo, feminine, wide hips, worst quality, low quality, lowres, bad anatomy, bad hands, extra fingers, deformed, blurry, watermark, signature, text, jpeg artifacts, (ponytail), ponytail braid`
 
 // SceneSpec pairs a human-readable label with the tag list that ends up
 // in the prompt. Label is used for continuity reminders fed back to the
