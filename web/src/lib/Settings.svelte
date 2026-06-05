@@ -25,7 +25,7 @@
 
   let { onclose }: { onclose: () => void } = $props();
 
-  type Tab = 'llm' | 'stt' | 'tts' | 'image' | 'appearance';
+  type Tab = 'llm' | 'tool' | 'stt' | 'tts' | 'image' | 'appearance';
   let tab = $state<Tab>('llm');
 
   let settings = $state<AppSettings | null>(null);
@@ -44,6 +44,10 @@
   let llmTesting = $state(false);
   let llmContext = $state<number | null>(null);
 
+  let toolModels = $state<string[]>([]);
+  let toolStatus = $state('');
+  let toolTesting = $state(false);
+
   let sttModels = $state<string[]>([]);
   let sttStatus = $state('');
   let sttTesting = $state(false);
@@ -60,14 +64,17 @@
   // the upstream provider on every keystroke. Mirrors the 400 ms
   // QTimer the desktop dialog uses.
   let llmTimer: ReturnType<typeof setTimeout> | null = null;
+  let toolTimer: ReturnType<typeof setTimeout> | null = null;
   let sttTimer: ReturnType<typeof setTimeout> | null = null;
   let ttsTimer: ReturnType<typeof setTimeout> | null = null;
 
-  function debounce(slot: 'llm' | 'stt' | 'tts', fn: () => void, ms = 400) {
-    const current = slot === 'llm' ? llmTimer : slot === 'stt' ? sttTimer : ttsTimer;
+  function debounce(slot: 'llm' | 'tool' | 'stt' | 'tts', fn: () => void, ms = 400) {
+    const current =
+      slot === 'llm' ? llmTimer : slot === 'tool' ? toolTimer : slot === 'stt' ? sttTimer : ttsTimer;
     if (current) clearTimeout(current);
     const t = setTimeout(fn, ms);
     if (slot === 'llm') llmTimer = t;
+    else if (slot === 'tool') toolTimer = t;
     else if (slot === 'stt') sttTimer = t;
     else ttsTimer = t;
   }
@@ -78,6 +85,7 @@
       // Kick off model fetches for every service so the dropdowns
       // are populated by the time the user clicks into the tab.
       refreshLLMModels();
+      refreshToolModels();
       refreshSTTModels();
       refreshTTSModels();
     } catch (e) {
@@ -87,6 +95,7 @@
 
   onDestroy(() => {
     if (llmTimer) clearTimeout(llmTimer);
+    if (toolTimer) clearTimeout(toolTimer);
     if (sttTimer) clearTimeout(sttTimer);
     if (ttsTimer) clearTimeout(ttsTimer);
     if (ttsAudioURL) URL.revokeObjectURL(ttsAudioURL);
@@ -97,6 +106,8 @@
     switch (kind) {
       case 'llm':
         return { kind, endpoint: s.api_endpoint, api_key: s.api_key, model: s.model };
+      case 'tool':
+        return { kind, endpoint: s.tool_endpoint, api_key: s.tool_api_key, model: s.tool_model };
       case 'stt':
         return { kind, endpoint: s.stt_endpoint, api_key: s.stt_api_key };
       case 'tts':
@@ -114,6 +125,16 @@
       if (res.context_length !== undefined) llmContext = res.context_length;
     } catch {
       llmModels = [];
+    }
+  }
+
+  async function refreshToolModels() {
+    if (!settings) return;
+    try {
+      const res = await probeModels(probeBody('tool'));
+      toolModels = res.models;
+    } catch {
+      toolModels = [];
     }
   }
 
@@ -140,20 +161,24 @@
   async function runTest(kind: ProbeBody['kind']) {
     if (!settings) return;
     if (kind === 'llm') { llmTesting = true; llmStatus = 'Testing…'; }
+    if (kind === 'tool') { toolTesting = true; toolStatus = 'Testing…'; }
     if (kind === 'stt') { sttTesting = true; sttStatus = 'Testing…'; }
     if (kind === 'image') { imgTesting = true; imgStatus = 'Testing…'; }
     try {
       const status = await testConnection(probeBody(kind));
       if (kind === 'llm') { llmStatus = status; if (status.startsWith('✓')) refreshLLMModels(); }
+      if (kind === 'tool') { toolStatus = status; if (status.startsWith('✓')) refreshToolModels(); }
       if (kind === 'stt') { sttStatus = status; if (status.startsWith('✓')) refreshSTTModels(); }
       if (kind === 'image') imgStatus = status;
     } catch (e) {
       const msg = '✗ ' + (e as Error).message;
       if (kind === 'llm') llmStatus = msg;
+      if (kind === 'tool') toolStatus = msg;
       if (kind === 'stt') sttStatus = msg;
       if (kind === 'image') imgStatus = msg;
     } finally {
       if (kind === 'llm') llmTesting = false;
+      if (kind === 'tool') toolTesting = false;
       if (kind === 'stt') sttTesting = false;
       if (kind === 'image') imgTesting = false;
     }
@@ -233,6 +258,7 @@
     {:else}
       <nav class="tabs">
         <button class:active={tab === 'llm'} onclick={() => (tab = 'llm')}>LLM</button>
+        <button class:active={tab === 'tool'} onclick={() => (tab = 'tool')}>Tool Model</button>
         <button class:active={tab === 'stt'} onclick={() => (tab = 'stt')}>Speech-to-Text</button>
         <button class:active={tab === 'tts'} onclick={() => (tab = 'tts')}>Text-to-Speech</button>
         <button class:active={tab === 'image'} onclick={() => (tab = 'image')}>Image Generation</button>
@@ -290,6 +316,45 @@
             <div class="test-row">
               <button onclick={() => runTest('llm')} disabled={llmTesting}>Test connection</button>
               <span class="status">{llmStatus}</span>
+            </div>
+          </div>
+        {:else if tab === 'tool'}
+          <div class="form">
+            <p class="note">A smaller, faster model for the background memory pass — the only step that calls tools. Leave blank to reuse the main LLM. A separate endpoint keeps the memory pass off the reply model's GPU.</p>
+            <label>Endpoint
+              <input
+                bind:value={settings.tool_endpoint}
+                placeholder="(falls back to API endpoint)"
+                oninput={() => debounce('tool', refreshToolModels)}
+              />
+            </label>
+            <label>API key
+              <input
+                type="password"
+                bind:value={settings.tool_api_key}
+                placeholder="(falls back to API key)"
+                oninput={() => debounce('tool', refreshToolModels)}
+              />
+              {#if settings.tool_api_key === SECRET_MASK}
+                <small class="hint">A saved key is in use. Type to replace it.</small>
+              {/if}
+            </label>
+            <label>Model
+              <input
+                bind:value={settings.tool_model}
+                list="tool-model-list"
+                placeholder="(falls back to main model)"
+                oninput={() => debounce('tool', refreshToolModels, 600)}
+              />
+              <datalist id="tool-model-list">
+                {#each toolModels as id}
+                  <option value={id}></option>
+                {/each}
+              </datalist>
+            </label>
+            <div class="test-row">
+              <button onclick={() => runTest('tool')} disabled={toolTesting}>Test connection</button>
+              <span class="status">{toolStatus}</span>
             </div>
           </div>
         {:else if tab === 'stt'}
@@ -509,6 +574,7 @@
   }
   .form select { padding: 0.35rem 0.5rem; }
   .hint { color: var(--muted); font-size: 0.78rem; }
+  .note { color: var(--muted); font-size: 0.82rem; margin: 0 0 0.25rem; line-height: 1.4; }
   .kv {
     display: flex;
     justify-content: space-between;

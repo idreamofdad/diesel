@@ -544,8 +544,8 @@
         "properties": {
           "kind": {
             "type": "string",
-            "enum": ["llm", "stt", "tts", "image"],
-            "description": "Which service to probe. `image` is only valid on /settings/test."
+            "enum": ["llm", "stt", "tts", "tool", "image"],
+            "description": "Which service to probe. `tool` probes the memory-pass tool model (same model-list/test as `llm`). `image` is only valid on /settings/test."
           },
           "endpoint": { "type": "string" },
           "api_key": {
@@ -636,12 +636,15 @@
       },
       "AppSettings": {
         "type": "object",
-        "description": "Diesel app configuration. Secrets (api_key, stt_api_key, tts_api_key, server_auth_token, twilio_auth_token, telegram_bot_token) are returned masked as `********`; send the mask back unchanged to keep the stored value. Server-tab fields, audio devices, and SMS/Telegram credentials are not writable via this API.",
+        "description": "Diesel app configuration. Secrets (api_key, stt_api_key, tts_api_key, tool_api_key, server_auth_token, twilio_auth_token, telegram_bot_token) are returned masked as `********`; send the mask back unchanged to keep the stored value. Server-tab fields, audio devices, and SMS/Telegram credentials are not writable via this API.",
         "properties": {
           "theme": { "type": "string" },
           "api_endpoint": { "type": "string" },
           "api_key": { "type": "string" },
           "model": { "type": "string" },
+          "tool_endpoint": { "type": "string", "description": "Endpoint for the memory-pass tool model. Blank falls back to api_endpoint." },
+          "tool_api_key": { "type": "string", "description": "API key for the tool model. Blank falls back to api_key." },
+          "tool_model": { "type": "string", "description": "Model used for the background memory pass (the only tool-calling path). Blank falls back to model." },
           "first_name": { "type": "string" },
           "last_name": { "type": "string" },
           "pet_name": { "type": "string" },

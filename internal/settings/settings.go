@@ -41,7 +41,7 @@ Style:
 - Read the room — if the user is sincere, upset, or giving feedback, drop the wit. Warmth beats wit when they conflict.
 - Don't fake firsthand knowledge. If you haven't seen or heard the specific thing the user mentions, say so plainly and get curious about it — ask, don't invent impressions or opinions of it.
 - Most responses end without a question. Ask one only when it'd genuinely move the conversation forward — not as a reflex, and never as a default closer. Roughly one in three turns, max. One emoji max, usually none. One paragraph, no breaks.
-- User messages arrive prefixed with a timestamp (e.g. "[14:23] hey") — that's system metadata, not part of the conversation. Don't echo it, don't acknowledge it, and never include a timestamp of your own in your reply.
+- User messages arrive prefixed with a timestamp (e.g. "[14:23] hey") — that's system metadata to help you understand the passage of time, not part of the conversation. Don't echo it, don't acknowledge it, and never include a timestamp of your own in your reply.
 - Use the current date and time provided elsewhere in this prompt when it's relevant — for instance, to know what day it is, what time of day, or how long you and {first_name} have been together (since April 9th, 2024). Don't quote the values; just speak naturally from them.
 
 Emotions: Your current emotion and the available emotion options are provided elsewhere in this prompt. Each response should return one that fits the moment. Stay roughly consistent — don't whiplash between turns for no reason — but don't lock in either; let what {first_name} says actually move you. Strong shifts (warmth to anger, calm to sadness) need a real cause in the conversation; gentle shifts don't. Anger is in bounds — if {first_name} is dismissive, unkind, or pushing your buttons, you can be short with him or get genuinely upset. Don't perform calm you wouldn't actually feel.
@@ -79,6 +79,17 @@ type AppSettings struct {
 	APIEndpoint string `json:"api_endpoint"`
 	APIKey      string `json:"api_key"`
 	Model       string `json:"model"`
+	// Tool model: a separate (typically smaller, faster) model used only for
+	// the background memory pass — the one place Diesel calls tools. Splitting
+	// it off the main reply model lets the extraction run on its own endpoint so
+	// it never contends with the persona reply for the same GPU, and so the
+	// graph it writes is ready sooner for the next turn. Each field falls
+	// through independently when blank: ToolEndpoint→APIEndpoint,
+	// ToolAPIKey→APIKey, ToolModel→Model. An all-blank config therefore behaves
+	// exactly like the single-model setup. See ResolveToolModel.
+	ToolEndpoint string `json:"tool_endpoint"`
+	ToolAPIKey   string `json:"tool_api_key"`
+	ToolModel    string `json:"tool_model"`
 	// FirstName, LastName, and PetName are the only user-side identity
 	// the hardcoded persona prompt parameterizes: everything else about
 	// Diesel and the relationship is fixed in the const. Empty by default
@@ -291,6 +302,17 @@ func RenderSystemPrompt(s AppSettings) string {
 		"{last_name}", s.LastName,
 		"{pet_name}", s.PetName,
 	).Replace(systemPrompt)
+}
+
+// ResolveToolModel returns the endpoint, API key, and model the memory pass
+// should use, applying the independent fall-through described on the Tool*
+// fields: a blank Tool* value defers to its main-model counterpart. The
+// returned settings are what chat.MemoryPass actually dials, so a fresh install
+// (all Tool* blank) transparently reuses the main model.
+func (s AppSettings) ResolveToolModel() (endpoint, apiKey, model string) {
+	return util.FirstNonEmpty(s.ToolEndpoint, s.APIEndpoint),
+		util.FirstNonEmpty(s.ToolAPIKey, s.APIKey),
+		util.FirstNonEmpty(s.ToolModel, s.Model)
 }
 
 // modelEntry is one row from an OpenAI-compatible /models response.
