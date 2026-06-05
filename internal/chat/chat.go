@@ -282,9 +282,9 @@ func Completion(ctx context.Context, s settings.AppSettings, history []Message, 
 const memoryHistoryMessages = 20
 
 // memoryInstruction steers the second-pass model: look at the conversation it
-// just had and record anything durable through the write tools. It's appended
-// as the final system message of the memory pass, after the persona + graph +
-// history that assembleMessages already laid down. It's deliberately concrete
+// just had and record anything durable through the write tools. It's carried in
+// the memory pass's single user turn, right after the transcript it refers to
+// (the graph rides separately as system context). It's deliberately concrete
 // and example-driven — small local models follow a worked example far more
 // reliably than abstract rules.
 const memoryInstruction = `# Updating your memory
@@ -436,12 +436,19 @@ func memoryMessages(ctx context.Context, history []Message, kb KnowledgeBase) []
 		b.WriteString(strings.TrimSpace(m.Content))
 		b.WriteByte('\n')
 	}
-	msgs = append(msgs, wireMsg{
-		Role:    RoleSystem,
-		Content: "Conversation to review (most recent last):\n\n" + b.String(),
-	})
 
-	msgs = append(msgs, wireMsg{Role: RoleSystem, Content: memoryInstruction})
+	// The transcript-to-review and the how-to instruction ride together as the
+	// single USER turn. Everything else here is system context (the graph), and
+	// a request with no user message at all makes strict chat templates 400 with
+	// "No user query found in messages" — which is exactly what a separately
+	// configured tools model with a stricter template does. Folding them into
+	// one user turn also leaves a user message last, which templates expect
+	// before they generate.
+	msgs = append(msgs, wireMsg{
+		Role: RoleUser,
+		Content: "Conversation to review (most recent last):\n\n" + b.String() +
+			"\n\n" + memoryInstruction,
+	})
 	return msgs
 }
 
