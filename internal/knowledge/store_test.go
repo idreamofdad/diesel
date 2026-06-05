@@ -96,6 +96,46 @@ func TestDeleteObservations_RemovesFact(t *testing.T) {
 	assert.Equal(t, []string{"b"}, g.Entities[0].Observations)
 }
 
+func TestEditObservations_RewritesInPlace(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	_, err := s.CreateEntities(ctx, []Entity{{Name: "Tyr", Type: "person", Observations: []string{"a", "b", "c"}}})
+	require.NoError(t, err)
+	require.NoError(t, s.EditObservations(ctx, []ObservationEdit{
+		{EntityName: "Tyr", OldContent: "b", NewContent: "B!"},
+	}))
+	g, err := s.ReadGraph(ctx)
+	require.NoError(t, err)
+	require.Len(t, g.Entities, 1)
+	// The edited fact keeps its original position rather than moving to the end.
+	assert.Equal(t, []string{"a", "B!", "c"}, g.Entities[0].Observations)
+}
+
+func TestEditObservations_FoldsExistingDuplicate(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	_, err := s.CreateEntities(ctx, []Entity{{Name: "Tyr", Type: "person", Observations: []string{"a", "b"}}})
+	require.NoError(t, err)
+	// Editing "a" into "b" must not violate (entity_name, content) uniqueness;
+	// the pre-existing "b" is folded into the edited row, leaving a single "b".
+	require.NoError(t, s.EditObservations(ctx, []ObservationEdit{
+		{EntityName: "Tyr", OldContent: "a", NewContent: "b"},
+	}))
+	g, err := s.ReadGraph(ctx)
+	require.NoError(t, err)
+	require.Len(t, g.Entities, 1)
+	assert.Equal(t, []string{"b"}, g.Entities[0].Observations)
+}
+
+func TestEditObservations_RejectsEmptyNewContent(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	_, err := s.CreateEntities(ctx, []Entity{{Name: "Tyr", Type: "person", Observations: []string{"a"}}})
+	require.NoError(t, err)
+	err = s.EditObservations(ctx, []ObservationEdit{{EntityName: "Tyr", OldContent: "a", NewContent: "  "}})
+	require.Error(t, err)
+}
+
 func TestSearchNodes_MatchesAcrossFields(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()

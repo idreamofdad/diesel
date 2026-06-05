@@ -35,11 +35,12 @@ const (
 	RoleTool = "tool"
 )
 
-// maxToolIterations bounds how many rounds of tool calls a single turn may
-// make before we force a final answer. A confused model that keeps calling
-// tools can't loop forever or rack up unbounded latency; after this many
-// rounds we ask once more with no tools and a strict schema.
-const maxToolIterations = 5
+// maxMemoryRounds bounds how many rounds of write-tool calls one memory pass
+// may make before we stop it. A confused model that keeps calling tools can't
+// loop forever or rack up unbounded background work; after this many rounds we
+// give up on the pass. (The reply path advertises no tools, so this cap is the
+// memory pass's alone.)
+const maxMemoryRounds = 10
 
 // knowledgeTokenWarn is the rough token size of the injected graph blob past
 // which we log a warning. The graph is persistent memory and only grows, so
@@ -361,7 +362,14 @@ func MemoryPass(ctx context.Context, s settings.AppSettings, history []Message, 
 	msgs := memoryMessages(ctx, history, kb)
 
 	rounds := 0
-	for iter := 0; iter < maxToolIterations; iter++ {
+	for iter := 0; iter < maxMemoryRounds; iter++ {
+		// A newer turn supersedes this pass by cancelling ctx — stop cleanly
+		// between rounds rather than firing another doomed request. This is the
+		// "reset": the next turn's pass starts the round count over from zero.
+		if ctx.Err() != nil {
+			logger.Debug().Msgf("memory pass superseded after %d round(s)", rounds)
+			return nil
+		}
 		// Tools-only, no schema, reasoning DISABLED. A thinking model left to
 		// reason here tends to spend the turn emitting a <think> block and
 		// return no tool calls at all; with thinking off it goes straight to
@@ -370,6 +378,12 @@ func MemoryPass(ctx context.Context, s settings.AppSettings, history []Message, 
 		logger.Debug().Msgf("memory round %d request: tools=%d messages=%d", iter, len(tools), len(msgs))
 		choice, _, status, err := callLLM(ctx, s, endpoint, body)
 		if err != nil {
+			// A cancel mid-request surfaces as a transport error; that's the
+			// supersede path, not a real failure, so don't log it as one.
+			if ctx.Err() != nil {
+				logger.Debug().Msgf("memory pass superseded mid-request after %d round(s)", rounds)
+				return nil
+			}
 			logger.Debug().Err(err).Msgf("memory round %d error: status=%d", iter, status)
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
@@ -395,7 +409,7 @@ func MemoryPass(ctx context.Context, s settings.AppSettings, history []Message, 
 			msgs = append(msgs, wireMsg{Role: RoleTool, ToolCallID: tc.ID, Content: result})
 		}
 	}
-	logger.Debug().Msgf("memory pass hit the %d-round cap", maxToolIterations)
+	logger.Debug().Msgf("memory pass hit the %d-round cap", maxMemoryRounds)
 	span.SetAttributes(attribute.Int("llm.memory.rounds", rounds))
 	return nil
 }

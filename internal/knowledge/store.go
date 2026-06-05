@@ -171,6 +171,63 @@ func (s *Store) DeleteObservations(ctx context.Context, muts []ObservationMutati
 	return nil
 }
 
+// ObservationEdit rewrites one existing fact on an entity from OldContent to
+// NewContent — the unit the editor uses to change an observation in place
+// rather than deleting and re-adding it.
+type ObservationEdit struct {
+	EntityName string `json:"entityName"`
+	OldContent string `json:"oldContent"`
+	NewContent string `json:"newContent"`
+}
+
+// EditObservations rewrites specific facts in place. Each edit changes one
+// entity's observation from OldContent to NewContent, keeping the underlying
+// row — and so the fact's position in the list — instead of appending a fresh
+// one the way a delete-then-add would. Empty new text is rejected; an edit
+// whose old text no longer matches is a silent no-op, mirroring
+// DeleteObservations' leniency. If NewContent already exists on the entity the
+// pre-existing copy is folded into the edited row so the (entity_name, content)
+// uniqueness still holds.
+func (s *Store) EditObservations(ctx context.Context, edits []ObservationEdit) error {
+	if len(edits) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("knowledge: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	for _, e := range edits {
+		name := strings.TrimSpace(e.EntityName)
+		oldC := strings.TrimSpace(e.OldContent)
+		newC := strings.TrimSpace(e.NewContent)
+		if newC == "" {
+			return fmt.Errorf("knowledge: observation must not be empty")
+		}
+		if oldC == newC {
+			continue
+		}
+		// Drop any existing copy of the target text first so the in-place
+		// UPDATE can't trip the (entity_name, content) uniqueness constraint.
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM kg_observations WHERE entity_name = ? AND content = ?`,
+			name, newC,
+		); err != nil {
+			return fmt.Errorf("knowledge: edit observation on %q: %w", name, err)
+		}
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE kg_observations SET content = ? WHERE entity_name = ? AND content = ?`,
+			newC, name, oldC,
+		); err != nil {
+			return fmt.Errorf("knowledge: edit observation on %q: %w", name, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("knowledge: commit: %w", err)
+	}
+	return nil
+}
+
 // CreateRelations adds directed, typed edges. Both endpoints must already
 // exist: a relation to a missing entity is rejected with a clear error so the
 // graph stays consistent (no auto-created stub nodes). Re-adding the same

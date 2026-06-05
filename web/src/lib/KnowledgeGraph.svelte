@@ -7,7 +7,14 @@
   // simulation run on requestAnimationFrame, so there's no d3/npm footprint.
 
   import { onMount, onDestroy } from 'svelte';
-  import { fetchGraph, type KnowledgeGraph, type KGRelation } from './hub';
+  import {
+    fetchGraph,
+    addObservation,
+    editObservation,
+    deleteObservation,
+    type KnowledgeGraph,
+    type KGRelation,
+  } from './hub';
 
   let { onback }: { onback: () => void } = $props();
 
@@ -27,7 +34,15 @@
   let nodes = $state<Node[]>([]);
   let links = $state<Link[]>([]);
   let loadError = $state('');
+  let actionError = $state('');
   let selected = $state<number | null>(null);
+
+  // Side-panel observation editing state. newObs is the add-row input;
+  // editingObs holds the original text of the row being edited (its key),
+  // editText the in-progress replacement.
+  let newObs = $state('');
+  let editingObs = $state('');
+  let editText = $state('');
 
   let width = $state(800);
   let height = $state(600);
@@ -161,6 +176,8 @@
     e.preventDefault();
     dragging = i;
     nodes[i].fixed = true;
+    // Switching to a different bubble clears any in-progress observation edit.
+    if (selected !== i) resetObsForms();
     selected = i;
     (e.target as Element).setPointerCapture(e.pointerId);
     restart();
@@ -203,6 +220,81 @@
     return links
       .filter(l => nodes[l.s].name === name || nodes[l.t].name === name)
       .map(l => ({ from: nodes[l.s].name, to: nodes[l.t].name, relationType: l.rel }));
+  }
+
+  // ── Observation editing ──
+  // Mutations write straight through the REST API — the same graph the model
+  // reads each turn — then patch the fresh observations back into the existing
+  // nodes (by name) instead of calling load(): a full rebuild would re-seed the
+  // layout and drop the selection, jarring mid-edit.
+  async function refreshObs() {
+    const g = await fetchGraph();
+    const byName = new Map(g.entities.map(e => [e.name, e.observations ?? []]));
+    for (const node of nodes) {
+      const obs = byName.get(node.name);
+      if (obs) {
+        node.obs = obs;
+        node.r = 16 + Math.min(obs.length, 6) * 2;
+      }
+    }
+    restart();
+  }
+
+  async function run(fn: () => Promise<void>) {
+    actionError = '';
+    try {
+      await fn();
+      await refreshObs();
+    } catch (e) {
+      actionError = (e as Error).message;
+    }
+  }
+
+  function resetObsForms() {
+    newObs = '';
+    editingObs = '';
+    editText = '';
+    actionError = '';
+  }
+
+  async function addObs() {
+    const content = newObs.trim();
+    if (!content || !sel) return;
+    const entity = sel.name;
+    await run(() => addObservation(entity, content));
+    newObs = '';
+  }
+
+  function startEdit(obs: string) {
+    editingObs = obs;
+    editText = obs;
+    actionError = '';
+  }
+
+  function cancelEdit() {
+    editingObs = '';
+    editText = '';
+  }
+
+  // saveObs rewrites the edited observation in place; unchanged or empty text
+  // just closes the editor.
+  async function saveObs() {
+    const orig = editingObs;
+    const next = editText.trim();
+    if (!orig || !sel) return;
+    if (!next || next === orig) {
+      cancelEdit();
+      return;
+    }
+    const entity = sel.name;
+    await run(() => editObservation(entity, orig, next));
+    cancelEdit();
+  }
+
+  async function removeObs(obs: string) {
+    if (!sel) return;
+    const entity = sel.name;
+    await run(() => deleteObservation(entity, obs));
   }
 </script>
 
@@ -254,9 +346,30 @@
         <div class="type" style="color:{colorFor(sel.type)}">{sel.type}</div>
         <div class="sec">Observations</div>
         {#if sel.obs.length === 0}<p class="muted">(none)</p>{/if}
-        <ul>
-          {#each sel.obs as o (o)}<li>{o}</li>{/each}
-        </ul>
+        {#each sel.obs as o (o)}
+          <div class="orow">
+            {#if editingObs === o}
+              <input class="oedit" bind:value={editText}
+                onkeydown={(e) => {
+                  if (e.key === 'Enter') saveObs();
+                  else if (e.key === 'Escape') cancelEdit();
+                }} />
+              <button class="act" title="Save" onclick={saveObs} disabled={!editText.trim()}>✓</button>
+              <button class="act" title="Cancel" onclick={cancelEdit}>↩</button>
+            {:else}
+              <span class="otext">{o}</span>
+              <button class="act" title="Edit observation" onclick={() => startEdit(o)}>✎</button>
+              <button class="act del" title="Delete observation" onclick={() => removeObs(o)}>✕</button>
+            {/if}
+          </div>
+        {/each}
+        <div class="oadd">
+          <input placeholder="New observation…" bind:value={newObs}
+            onkeydown={(e) => e.key === 'Enter' && addObs()} />
+          <button onclick={addObs} disabled={!newObs.trim()}>Add</button>
+        </div>
+        {#if actionError}<p class="error panelerror">{actionError}</p>{/if}
+
         <div class="sec">Relations</div>
         {#each relsOf(sel.name) as r (r.from + r.relationType + r.to)}
           <div class="rel">{r.from} —{r.relationType}→ {r.to}</div>
@@ -348,8 +461,35 @@
     border-top: 1px solid var(--border);
     padding-top: 0.5rem;
   }
-  .panel ul { margin: 0.3rem 0; padding-left: 1.1rem; }
-  .panel li { font-size: 0.85rem; margin: 0.15rem 0; }
   .rel { font-size: 0.82rem; margin: 0.15rem 0; word-break: break-word; }
   .muted { color: var(--muted); font-size: 0.85rem; margin: 0.2rem 0; }
+
+  .orow {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    margin: 0.15rem 0;
+  }
+  .otext { flex: 1 1 auto; font-size: 0.85rem; word-break: break-word; }
+  .oedit { flex: 1 1 auto; min-width: 0; padding: 0.25rem 0.4rem; font-size: 0.85rem; }
+  .oadd {
+    display: flex;
+    gap: 0.3rem;
+    margin-top: 0.4rem;
+  }
+  .oadd input { flex: 1 1 auto; min-width: 0; padding: 0.3rem 0.4rem; font-size: 0.85rem; }
+  .oadd button { padding: 0.3rem 0.6rem; font-size: 0.82rem; }
+  .act {
+    flex: 0 0 auto;
+    background: transparent;
+    border: 0;
+    color: var(--muted);
+    padding: 0.05rem 0.3rem;
+    font-size: 0.82rem;
+    line-height: 1;
+    cursor: pointer;
+  }
+  .act:hover:not(:disabled) { background: transparent; color: var(--text); }
+  .act.del:hover:not(:disabled) { color: #e06c6c; }
+  .panelerror { padding: 0.4rem 0 0; font-size: 0.8rem; }
 </style>

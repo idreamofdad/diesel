@@ -165,6 +165,23 @@ func TestMemoryPass_SendsUserMessage(t *testing.T) {
 		"memory pass must send at least one user message or strict templates reject it")
 }
 
+// TestMemoryPass_StopsWhenSuperseded: a cancelled context (a newer turn taking
+// over) stops the pass cleanly — no error, and no request ever fires.
+func TestMemoryPass_StopsWhenSuperseded(t *testing.T) {
+	url, bodies := scriptedServer(t, []func(http.ResponseWriter){toolCallResponse})
+	kb := &fakeKB{graph: `{"entities":[],"relations":[]}`}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // a newer turn superseded this pass before it could run
+	err := MemoryPass(ctx,
+		settings.AppSettings{APIEndpoint: url, Model: "m"},
+		[]Message{{Role: RoleUser, Content: "I'm Tyr"}},
+		kb,
+	)
+	require.NoError(t, err, "supersede is a clean stop, not a failure")
+	assert.Empty(t, kb.calls, "no tools run once superseded")
+	assert.Empty(t, *bodies, "no LLM request fires once superseded")
+}
+
 // TestMemoryPass_NoOpWhenNothingNew: when the model makes no tool calls, the
 // pass records nothing and returns cleanly.
 func TestMemoryPass_NoOpWhenNothingNew(t *testing.T) {

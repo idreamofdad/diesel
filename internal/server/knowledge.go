@@ -32,6 +32,7 @@ func (m *Manager) registerKnowledgeRoutes(api *gin.RouterGroup) {
 	api.POST("/knowledge/entities", m.handleKnowledgeCreateEntities)
 	api.POST("/knowledge/entities/delete", m.handleKnowledgeDeleteEntities)
 	api.POST("/knowledge/observations", m.handleKnowledgeAddObservations)
+	api.POST("/knowledge/observations/edit", m.handleKnowledgeEditObservations)
 	api.POST("/knowledge/observations/delete", m.handleKnowledgeDeleteObservations)
 	api.POST("/knowledge/relations", m.handleKnowledgeCreateRelations)
 	api.POST("/knowledge/relations/delete", m.handleKnowledgeDeleteRelations)
@@ -113,6 +114,25 @@ func (m *Manager) handleKnowledgeAddObservations(c *gin.Context) {
 		return
 	}
 	if err := store.AddObservations(c.Request.Context(), body.Observations); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func (m *Manager) handleKnowledgeEditObservations(c *gin.Context) {
+	store := m.knStoreOr503(c)
+	if store == nil {
+		return
+	}
+	var body struct {
+		Edits []knowledge.ObservationEdit `json:"edits"`
+	}
+	if err := c.BindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if err := store.EditObservations(c.Request.Context(), body.Edits); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}

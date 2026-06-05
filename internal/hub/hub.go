@@ -207,6 +207,10 @@ type Hub struct {
 	// passes are best-effort and off the reply's critical path, so a brief
 	// queue here never delays a user's reply.
 	memMu sync.Mutex
+	// memCancel cancels the memory pass currently in flight, if any. A newer
+	// turn calls it so a pass still chewing on older context stops and yields
+	// to the fresh one instead of queuing behind it. Guarded by mu.
+	memCancel context.CancelFunc
 }
 
 // New returns an empty hub backed by store. Call Start to populate from
@@ -583,9 +587,27 @@ func (h *Hub) runTurn(ctx context.Context, s settings.AppSettings, user chat.Mes
 // updateMemory runs the post-reply memory pass, serialized against other turns
 // so overlapping passes don't contend on the MCP session or the graph. Errors
 // are logged, not surfaced — the reply has already been delivered.
+//
+// A newer turn supersedes an older pass: before queuing, it cancels whatever
+// pass is in flight so the stale one stops mid-round and yields instead of
+// making this turn wait out its full round budget on out-of-date context.
 func (h *Hub) updateMemory(ctx context.Context, s settings.AppSettings, history []chat.Message, kb chat.KnowledgeBase, turnID int64) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	h.mu.Lock()
+	if h.memCancel != nil {
+		h.memCancel() // tell the previous pass (if still running) to stop
+	}
+	h.memCancel = cancel
+	h.mu.Unlock()
+
 	h.memMu.Lock()
 	defer h.memMu.Unlock()
+	// If yet another turn superseded us while we waited for the lock, skip the
+	// work entirely — its pass owns the latest context now.
+	if ctx.Err() != nil {
+		return
+	}
 	h.llmEnter("Remembering…")
 	defer h.llmExit()
 	if err := chat.MemoryPass(ctx, s, history, kb); err != nil {

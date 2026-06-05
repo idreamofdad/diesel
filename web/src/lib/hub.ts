@@ -503,6 +503,16 @@ export async function addObservation(entityName: string, content: string): Promi
   });
 }
 
+export async function editObservation(
+  entityName: string,
+  oldContent: string,
+  newContent: string,
+): Promise<void> {
+  await knowledgePost('/api/v1/knowledge/observations/edit', {
+    edits: [{ entityName, oldContent, newContent }],
+  });
+}
+
 export async function deleteObservation(entityName: string, content: string): Promise<void> {
   await knowledgePost('/api/v1/knowledge/observations/delete', {
     deletions: [{ entityName, contents: [content] }],
