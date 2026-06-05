@@ -18,7 +18,7 @@ const ImageQualityPrefix = `masterpiece, best quality, very aesthetic, absurdres
 // handing it to Generate, then appends an emotion fragment from
 // EmotionPrompts. The background tag is sourced from ImageBackgrounds
 // per turn — kept out of here so the scene can swap with the chat.
-const ImagePrompt = `1boy, solo, dubusi, ochman, fat man, hairy, (braided beard), mustache, short green hair, green eyes, beard braid`
+const ImagePrompt = `1boy, solo, dubusi, ochman, fat man, hairy, (braided beard), mustache, short green hair, green eyes, (beard braid)`
 
 // ImageClothing is appended to ImagePrompt when the structured reply's
 // Naked flag is false. Kept separate so the splice can swap it for
