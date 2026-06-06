@@ -525,6 +525,12 @@ export async function createRelation(from: string, to: string, relationType: str
   });
 }
 
+export async function editRelation(oldRel: KGRelation, newRel: KGRelation): Promise<void> {
+  await knowledgePost('/api/v1/knowledge/relations/edit', {
+    edits: [{ old: oldRel, new: newRel }],
+  });
+}
+
 export async function deleteRelation(rel: KGRelation): Promise<void> {
   await knowledgePost('/api/v1/knowledge/relations/delete', { relations: [rel] });
 }

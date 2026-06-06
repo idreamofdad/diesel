@@ -12,6 +12,9 @@
     addObservation,
     editObservation,
     deleteObservation,
+    createRelation,
+    editRelation,
+    deleteRelation,
     type KnowledgeGraph,
     type KGRelation,
   } from './hub';
@@ -43,6 +46,14 @@
   let newObs = $state('');
   let editingObs = $state('');
   let editText = $state('');
+  // Side-panel relation editing state. The add row relates the selected node
+  // (the "from") to newRelTarget; editingRel holds the original triple of the
+  // row being edited, with relEditType/relEditOther the in-progress values.
+  let newRelType = $state('');
+  let newRelTarget = $state('');
+  let editingRel = $state<KGRelation | null>(null);
+  let relEditType = $state('');
+  let relEditOther = $state('');
 
   let width = $state(800);
   let height = $state(600);
@@ -176,9 +187,11 @@
     e.preventDefault();
     dragging = i;
     nodes[i].fixed = true;
-    // Switching to a different bubble clears any in-progress observation edit.
-    if (selected !== i) resetObsForms();
+    // Switching to a different bubble clears any in-progress edit. Reset after
+    // selected changes so otherNames (and the target default) track the new node.
+    const changed = selected !== i;
     selected = i;
+    if (changed) resetPanelForms();
     (e.target as Element).setPointerCapture(e.pointerId);
     restart();
   }
@@ -216,18 +229,26 @@
   });
 
   const sel = $derived(selected !== null ? nodes[selected] : null);
+  // Entities other than the selected one — relation targets, sorted by name.
+  const otherNames = $derived(
+    sel ? nodes.filter(n => n.name !== sel.name).map(n => n.name).sort() : [],
+  );
   function relsOf(name: string): KGRelation[] {
     return links
       .filter(l => nodes[l.s].name === name || nodes[l.t].name === name)
       .map(l => ({ from: nodes[l.s].name, to: nodes[l.t].name, relationType: l.rel }));
   }
+  function relKey(r: KGRelation): string {
+    return `${r.from} ${r.relationType} ${r.to}`;
+  }
 
-  // ── Observation editing ──
+  // ── Observation & relation editing ──
   // Mutations write straight through the REST API — the same graph the model
-  // reads each turn — then patch the fresh observations back into the existing
-  // nodes (by name) instead of calling load(): a full rebuild would re-seed the
-  // layout and drop the selection, jarring mid-edit.
-  async function refreshObs() {
+  // reads each turn — then patch the fresh observations and relations back into
+  // the existing nodes (by name) instead of calling load(): a full rebuild
+  // would re-seed the layout and drop the selection, jarring mid-edit. Entities
+  // don't change here, so node positions and the selection index stay valid.
+  async function refreshGraph() {
     const g = await fetchGraph();
     const byName = new Map(g.entities.map(e => [e.name, e.observations ?? []]));
     for (const node of nodes) {
@@ -237,6 +258,14 @@
         node.r = 16 + Math.min(obs.length, 6) * 2;
       }
     }
+    const idx = new Map(nodes.map((n, i) => [n.name, i]));
+    const ls: Link[] = [];
+    for (const r of g.relations) {
+      const s = idx.get(r.from);
+      const t = idx.get(r.to);
+      if (s !== undefined && t !== undefined) ls.push({ s, t, rel: r.relationType });
+    }
+    links = ls;
     restart();
   }
 
@@ -244,16 +273,21 @@
     actionError = '';
     try {
       await fn();
-      await refreshObs();
+      await refreshGraph();
     } catch (e) {
       actionError = (e as Error).message;
     }
   }
 
-  function resetObsForms() {
+  function resetPanelForms() {
     newObs = '';
     editingObs = '';
     editText = '';
+    newRelType = '';
+    newRelTarget = otherNames[0] ?? '';
+    editingRel = null;
+    relEditType = '';
+    relEditOther = '';
     actionError = '';
   }
 
@@ -295,6 +329,52 @@
     if (!sel) return;
     const entity = sel.name;
     await run(() => deleteObservation(entity, obs));
+  }
+
+  // A relation in the panel runs from the selected node out to relTarget. Edits
+  // keep the original direction: relEditOther replaces whichever endpoint isn't
+  // the selected node.
+  async function addRel() {
+    const rt = newRelType.trim();
+    if (!rt || !newRelTarget || !sel) return;
+    const from = sel.name;
+    await run(() => createRelation(from, newRelTarget, rt));
+    newRelType = '';
+  }
+
+  function startRelEdit(r: KGRelation) {
+    editingRel = r;
+    relEditType = r.relationType;
+    relEditOther = r.from === sel?.name ? r.to : r.from;
+    actionError = '';
+  }
+
+  function cancelRelEdit() {
+    editingRel = null;
+    relEditType = '';
+    relEditOther = '';
+  }
+
+  async function saveRel() {
+    const orig = editingRel;
+    const rt = relEditType.trim();
+    if (!orig || !sel || !rt || !relEditOther) return;
+    // Preserve direction: if the selected node was the source, it stays the
+    // source and relEditOther becomes the target, and vice versa.
+    const outgoing = orig.from === sel.name;
+    const next: KGRelation = outgoing
+      ? { from: sel.name, to: relEditOther, relationType: rt }
+      : { from: relEditOther, to: sel.name, relationType: rt };
+    if (next.from === orig.from && next.to === orig.to && next.relationType === orig.relationType) {
+      cancelRelEdit();
+      return;
+    }
+    await run(() => editRelation(orig, next));
+    cancelRelEdit();
+  }
+
+  async function removeRel(r: KGRelation) {
+    await run(() => deleteRelation(r));
   }
 </script>
 
@@ -371,9 +451,39 @@
         {#if actionError}<p class="error panelerror">{actionError}</p>{/if}
 
         <div class="sec">Relations</div>
-        {#each relsOf(sel.name) as r (r.from + r.relationType + r.to)}
-          <div class="rel">{r.from} —{r.relationType}→ {r.to}</div>
+        {#if relsOf(sel.name).length === 0}<p class="muted">(none)</p>{/if}
+        {#each relsOf(sel.name) as r (relKey(r))}
+          <div class="orow">
+            {#if editingRel && relKey(editingRel) === relKey(r)}
+              <span class="reldir" title={r.from === sel.name ? 'outgoing' : 'incoming'}
+                >{r.from === sel.name ? '→' : '←'}</span>
+              <input class="reltype" placeholder="relation" bind:value={relEditType}
+                onkeydown={(e) => {
+                  if (e.key === 'Enter') saveRel();
+                  else if (e.key === 'Escape') cancelRelEdit();
+                }} />
+              <select bind:value={relEditOther}>
+                {#each otherNames as n (n)}<option value={n}>{n}</option>{/each}
+              </select>
+              <button class="act" title="Save" onclick={saveRel}
+                disabled={!relEditType.trim() || !relEditOther}>✓</button>
+              <button class="act" title="Cancel" onclick={cancelRelEdit}>↩</button>
+            {:else}
+              <span class="otext">{r.from} —{r.relationType}→ {r.to}</span>
+              <button class="act" title="Edit relation" onclick={() => startRelEdit(r)}>✎</button>
+              <button class="act del" title="Delete relation" onclick={() => removeRel(r)}>✕</button>
+            {/if}
+          </div>
         {/each}
+        <div class="oadd reladd">
+          <span class="reldir" title="outgoing">→</span>
+          <input class="reltype" placeholder="relation (e.g. owns)" bind:value={newRelType}
+            onkeydown={(e) => e.key === 'Enter' && addRel()} />
+          <select bind:value={newRelTarget} disabled={otherNames.length === 0}>
+            {#each otherNames as n (n)}<option value={n}>{n}</option>{/each}
+          </select>
+          <button onclick={addRel} disabled={!newRelType.trim() || !newRelTarget}>Add</button>
+        </div>
       </aside>
     {/if}
   </div>
@@ -461,12 +571,12 @@
     border-top: 1px solid var(--border);
     padding-top: 0.5rem;
   }
-  .rel { font-size: 0.82rem; margin: 0.15rem 0; word-break: break-word; }
   .muted { color: var(--muted); font-size: 0.85rem; margin: 0.2rem 0; }
 
   .orow {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 0.25rem;
     margin: 0.15rem 0;
   }
@@ -474,11 +584,20 @@
   .oedit { flex: 1 1 auto; min-width: 0; padding: 0.25rem 0.4rem; font-size: 0.85rem; }
   .oadd {
     display: flex;
+    flex-wrap: wrap;
     gap: 0.3rem;
     margin-top: 0.4rem;
   }
   .oadd input { flex: 1 1 auto; min-width: 0; padding: 0.3rem 0.4rem; font-size: 0.85rem; }
   .oadd button { padding: 0.3rem 0.6rem; font-size: 0.82rem; }
+  .reldir { flex: 0 0 auto; color: var(--muted); font-size: 0.85rem; }
+  .reltype { flex: 1 1 5rem; min-width: 0; padding: 0.25rem 0.4rem; font-size: 0.82rem; }
+  .panel select {
+    flex: 1 1 5rem;
+    min-width: 0;
+    padding: 0.25rem 0.2rem;
+    font-size: 0.82rem;
+  }
   .act {
     flex: 0 0 auto;
     background: transparent;

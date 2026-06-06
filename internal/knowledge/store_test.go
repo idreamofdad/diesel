@@ -136,6 +136,59 @@ func TestEditObservations_RejectsEmptyNewContent(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestEditRelations_RetargetsAndRetypes(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	_, err := s.CreateEntities(ctx, []Entity{{Name: "A", Type: "p"}, {Name: "B", Type: "p"}, {Name: "C", Type: "p"}})
+	require.NoError(t, err)
+	_, err = s.CreateRelations(ctx, []Relation{{From: "A", To: "B", RelationType: "owns"}})
+	require.NoError(t, err)
+	require.NoError(t, s.EditRelations(ctx, []RelationEdit{{
+		Old: Relation{From: "A", To: "B", RelationType: "owns"},
+		New: Relation{From: "A", To: "C", RelationType: "loves"},
+	}}))
+	g, err := s.ReadGraph(ctx)
+	require.NoError(t, err)
+	require.Len(t, g.Relations, 1)
+	assert.Equal(t, Relation{From: "A", To: "C", RelationType: "loves"}, g.Relations[0])
+}
+
+func TestEditRelations_RejectsDanglingNewEndpoint(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	_, err := s.CreateEntities(ctx, []Entity{{Name: "A", Type: "p"}, {Name: "B", Type: "p"}})
+	require.NoError(t, err)
+	_, err = s.CreateRelations(ctx, []Relation{{From: "A", To: "B", RelationType: "owns"}})
+	require.NoError(t, err)
+	err = s.EditRelations(ctx, []RelationEdit{{
+		Old: Relation{From: "A", To: "B", RelationType: "owns"},
+		New: Relation{From: "A", To: "Ghost", RelationType: "owns"},
+	}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Ghost")
+}
+
+func TestEditRelations_FoldsExistingDuplicate(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	_, err := s.CreateEntities(ctx, []Entity{{Name: "A", Type: "p"}, {Name: "B", Type: "p"}})
+	require.NoError(t, err)
+	_, err = s.CreateRelations(ctx, []Relation{
+		{From: "A", To: "B", RelationType: "owns"},
+		{From: "A", To: "B", RelationType: "likes"},
+	})
+	require.NoError(t, err)
+	// Editing "owns" into the already-present "likes" must leave a single edge.
+	require.NoError(t, s.EditRelations(ctx, []RelationEdit{{
+		Old: Relation{From: "A", To: "B", RelationType: "owns"},
+		New: Relation{From: "A", To: "B", RelationType: "likes"},
+	}}))
+	g, err := s.ReadGraph(ctx)
+	require.NoError(t, err)
+	require.Len(t, g.Relations, 1)
+	assert.Equal(t, "likes", g.Relations[0].RelationType)
+}
+
 func TestSearchNodes_MatchesAcrossFields(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()

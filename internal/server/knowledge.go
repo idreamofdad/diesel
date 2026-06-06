@@ -35,6 +35,7 @@ func (m *Manager) registerKnowledgeRoutes(api *gin.RouterGroup) {
 	api.POST("/knowledge/observations/edit", m.handleKnowledgeEditObservations)
 	api.POST("/knowledge/observations/delete", m.handleKnowledgeDeleteObservations)
 	api.POST("/knowledge/relations", m.handleKnowledgeCreateRelations)
+	api.POST("/knowledge/relations/edit", m.handleKnowledgeEditRelations)
 	api.POST("/knowledge/relations/delete", m.handleKnowledgeDeleteRelations)
 }
 
@@ -176,6 +177,25 @@ func (m *Manager) handleKnowledgeCreateRelations(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"relations": created})
+}
+
+func (m *Manager) handleKnowledgeEditRelations(c *gin.Context) {
+	store := m.knStoreOr503(c)
+	if store == nil {
+		return
+	}
+	var body struct {
+		Edits []knowledge.RelationEdit `json:"edits"`
+	}
+	if err := c.BindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if err := store.EditRelations(c.Request.Context(), body.Edits); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
 func (m *Manager) handleKnowledgeDeleteRelations(c *gin.Context) {

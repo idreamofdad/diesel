@@ -298,6 +298,74 @@ func (s *Store) DeleteRelations(ctx context.Context, rels []Relation) error {
 	return nil
 }
 
+// RelationEdit rewrites one existing edge to a new triple — the unit the
+// editor uses to retype or retarget a relation in place rather than deleting
+// and re-adding it.
+type RelationEdit struct {
+	Old Relation `json:"old"`
+	New Relation `json:"new"`
+}
+
+// EditRelations rewrites specific edges in place. Each edit changes the Old
+// triple to the New one, keeping the underlying row. The New endpoints must
+// already exist and its type must be non-empty (same rules as CreateRelations);
+// an edit whose Old triple no longer matches is a silent no-op. An edit whose
+// New triple is identical to Old is skipped. If the New triple already exists
+// the pre-existing copy is folded into the edited row so the
+// (from_name, to_name, relation_type) uniqueness still holds.
+func (s *Store) EditRelations(ctx context.Context, edits []RelationEdit) error {
+	if len(edits) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("knowledge: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	for _, e := range edits {
+		oldFrom := strings.TrimSpace(e.Old.From)
+		oldTo := strings.TrimSpace(e.Old.To)
+		oldRel := strings.TrimSpace(e.Old.RelationType)
+		newFrom := strings.TrimSpace(e.New.From)
+		newTo := strings.TrimSpace(e.New.To)
+		newRel := strings.TrimSpace(e.New.RelationType)
+		if newRel == "" {
+			return fmt.Errorf("knowledge: relation type must not be empty")
+		}
+		if oldFrom == newFrom && oldTo == newTo && oldRel == newRel {
+			continue
+		}
+		for label, name := range map[string]string{"from": newFrom, "to": newTo} {
+			ok, err := entityExistsTx(ctx, tx, name)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				return fmt.Errorf("knowledge: %s entity %q does not exist; create it before relating", label, name)
+			}
+		}
+		// Drop any existing copy of the target triple first so the in-place
+		// UPDATE can't trip the (from_name, to_name, relation_type) uniqueness.
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM kg_relations WHERE from_name = ? AND to_name = ? AND relation_type = ?`,
+			newFrom, newTo, newRel,
+		); err != nil {
+			return fmt.Errorf("knowledge: edit relation: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE kg_relations SET from_name = ?, to_name = ?, relation_type = ?
+			 WHERE from_name = ? AND to_name = ? AND relation_type = ?`,
+			newFrom, newTo, newRel, oldFrom, oldTo, oldRel,
+		); err != nil {
+			return fmt.Errorf("knowledge: edit relation: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("knowledge: commit: %w", err)
+	}
+	return nil
+}
+
 // ReadGraph returns the entire graph. Both slices are non-nil even when empty
 // so the serialized JSON reads as [] rather than null.
 func (s *Store) ReadGraph(ctx context.Context) (Graph, error) {
