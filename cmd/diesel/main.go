@@ -116,7 +116,7 @@ func main() {
 	// system-prompt injection flow through the bridge handed to the hub. The
 	// optional external HTTP listener is configured via Apply, hot-reapplied
 	// on every settings Save just like the other managers.
-	knMgr, err := knowledge.New(store)
+	knMgr, err := knowledge.New(store, settings.Load())
 	if err != nil {
 		logger.Fatal().Err(err).Msg("knowledge init")
 	}
