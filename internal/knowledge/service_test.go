@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"diesel/internal/settings"
 	"diesel/internal/storage"
 
 	"github.com/stretchr/testify/assert"
@@ -20,7 +21,7 @@ func openTestService(t *testing.T) *Service {
 	t.Helper()
 	st, err := storage.Open(filepath.Join(t.TempDir(), "diesel.db"))
 	require.NoError(t, err)
-	svc, err := New(st)
+	svc, err := New(st, settings.AppSettings{})
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		svc.Stop()

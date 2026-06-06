@@ -147,6 +147,41 @@ func TestMemoryPass_RecordsViaTools(t *testing.T) {
 	assert.False(t, hasSchema, "memory pass NEVER sends a response_format — no tools+schema clash")
 }
 
+// TestMemoryPass_SendsUserMessage: the memory pass must include a user turn.
+// A request of system-only messages makes strict chat templates 400 with
+// "No user query found in messages" — which is what a separately configured
+// tools model with a stricter template does.
+func TestMemoryPass_SendsUserMessage(t *testing.T) {
+	url, bodies := scriptedServer(t, []func(http.ResponseWriter){noToolCalls})
+	kb := &fakeKB{graph: `{"entities":[],"relations":[]}`}
+	err := MemoryPass(context.Background(),
+		settings.AppSettings{APIEndpoint: url, Model: "m"},
+		[]Message{{Role: RoleUser, Content: "I'm Tyr"}, {Role: RoleAssistant, Content: "hey"}},
+		kb,
+	)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(*bodies), 1)
+	assert.True(t, hasRole((*bodies)[0], "user"),
+		"memory pass must send at least one user message or strict templates reject it")
+}
+
+// TestMemoryPass_StopsWhenSuperseded: a cancelled context (a newer turn taking
+// over) stops the pass cleanly — no error, and no request ever fires.
+func TestMemoryPass_StopsWhenSuperseded(t *testing.T) {
+	url, bodies := scriptedServer(t, []func(http.ResponseWriter){toolCallResponse})
+	kb := &fakeKB{graph: `{"entities":[],"relations":[]}`}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // a newer turn superseded this pass before it could run
+	err := MemoryPass(ctx,
+		settings.AppSettings{APIEndpoint: url, Model: "m"},
+		[]Message{{Role: RoleUser, Content: "I'm Tyr"}},
+		kb,
+	)
+	require.NoError(t, err, "supersede is a clean stop, not a failure")
+	assert.Empty(t, kb.calls, "no tools run once superseded")
+	assert.Empty(t, *bodies, "no LLM request fires once superseded")
+}
+
 // TestMemoryPass_NoOpWhenNothingNew: when the model makes no tool calls, the
 // pass records nothing and returns cleanly.
 func TestMemoryPass_NoOpWhenNothingNew(t *testing.T) {
@@ -187,6 +222,17 @@ func TestToolsToWire_BackfillsProperties(t *testing.T) {
 	// The one-arg tool kept its real properties untouched.
 	props := wire[1]["function"].(map[string]any)["parameters"].(map[string]any)["properties"].(map[string]any)
 	assert.Contains(t, props, "query")
+}
+
+// hasRole reports whether any message in a request body carries the given role.
+func hasRole(body map[string]any, role string) bool {
+	msgs, _ := body["messages"].([]any)
+	for _, m := range msgs {
+		if mm, ok := m.(map[string]any); ok && mm["role"] == role {
+			return true
+		}
+	}
+	return false
 }
 
 // systemText concatenates the content of all system messages in a request body.

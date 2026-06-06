@@ -102,6 +102,89 @@ func (s *Store) DeleteEntities(ctx context.Context, names []string) error {
 	return nil
 }
 
+// EntityEdit renames and/or retypes one entity. Name identifies the existing
+// entity; NewName is its new name (equal to Name to change only the type) and
+// NewType its new type.
+type EntityEdit struct {
+	Name    string `json:"name"`
+	NewName string `json:"newName"`
+	NewType string `json:"newType"`
+}
+
+// EditEntities renames and/or retypes entities in place. A rename repoints the
+// entity's observations and both ends of its relations to the new name inside
+// one transaction, so the graph never dangles — the kg_* foreign keys cascade
+// on delete but not on update, so the references are moved by hand. The new
+// name must be free: renaming onto an existing entity is rejected rather than
+// silently merging two nodes. A missing entity is reported as a clear error.
+func (s *Store) EditEntities(ctx context.Context, edits []EntityEdit) error {
+	if len(edits) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("knowledge: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	for _, e := range edits {
+		oldName := strings.TrimSpace(e.Name)
+		newName := strings.TrimSpace(e.NewName)
+		newType := strings.TrimSpace(e.NewType)
+		if oldName == "" || newName == "" {
+			return fmt.Errorf("knowledge: entity name must not be empty")
+		}
+		ok, err := entityExistsTx(ctx, tx, oldName)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("knowledge: entity %q does not exist", oldName)
+		}
+		if newName == oldName {
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE kg_entities SET type = ? WHERE name = ?`, newType, oldName,
+			); err != nil {
+				return fmt.Errorf("knowledge: retype entity %q: %w", oldName, err)
+			}
+			continue
+		}
+		taken, err := entityExistsTx(ctx, tx, newName)
+		if err != nil {
+			return err
+		}
+		if taken {
+			return fmt.Errorf("knowledge: an entity named %q already exists", newName)
+		}
+		// Create the new node, repoint every reference to it, then drop the old
+		// node. In this order each statement leaves the foreign keys consistent,
+		// so immediate enforcement never trips and the final delete cascades over
+		// nothing.
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO kg_entities (name, type) VALUES (?, ?)`, newName, newType,
+		); err != nil {
+			return fmt.Errorf("knowledge: rename entity %q: %w", oldName, err)
+		}
+		for _, stmt := range []string{
+			`UPDATE kg_observations SET entity_name = ? WHERE entity_name = ?`,
+			`UPDATE kg_relations SET from_name = ? WHERE from_name = ?`,
+			`UPDATE kg_relations SET to_name = ? WHERE to_name = ?`,
+		} {
+			if _, err := tx.ExecContext(ctx, stmt, newName, oldName); err != nil {
+				return fmt.Errorf("knowledge: rename entity %q: %w", oldName, err)
+			}
+		}
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM kg_entities WHERE name = ?`, oldName,
+		); err != nil {
+			return fmt.Errorf("knowledge: rename entity %q: %w", oldName, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("knowledge: commit: %w", err)
+	}
+	return nil
+}
+
 // AddObservations appends facts to existing entities. The target entity must
 // already exist — a missing one is reported as a clear error (rather than the
 // raw foreign-key failure) so the model knows to create the entity first.
@@ -163,6 +246,63 @@ func (s *Store) DeleteObservations(ctx context.Context, muts []ObservationMutati
 			); err != nil {
 				return fmt.Errorf("knowledge: delete observation from %q: %w", name, err)
 			}
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("knowledge: commit: %w", err)
+	}
+	return nil
+}
+
+// ObservationEdit rewrites one existing fact on an entity from OldContent to
+// NewContent — the unit the editor uses to change an observation in place
+// rather than deleting and re-adding it.
+type ObservationEdit struct {
+	EntityName string `json:"entityName"`
+	OldContent string `json:"oldContent"`
+	NewContent string `json:"newContent"`
+}
+
+// EditObservations rewrites specific facts in place. Each edit changes one
+// entity's observation from OldContent to NewContent, keeping the underlying
+// row — and so the fact's position in the list — instead of appending a fresh
+// one the way a delete-then-add would. Empty new text is rejected; an edit
+// whose old text no longer matches is a silent no-op, mirroring
+// DeleteObservations' leniency. If NewContent already exists on the entity the
+// pre-existing copy is folded into the edited row so the (entity_name, content)
+// uniqueness still holds.
+func (s *Store) EditObservations(ctx context.Context, edits []ObservationEdit) error {
+	if len(edits) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("knowledge: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	for _, e := range edits {
+		name := strings.TrimSpace(e.EntityName)
+		oldC := strings.TrimSpace(e.OldContent)
+		newC := strings.TrimSpace(e.NewContent)
+		if newC == "" {
+			return fmt.Errorf("knowledge: observation must not be empty")
+		}
+		if oldC == newC {
+			continue
+		}
+		// Drop any existing copy of the target text first so the in-place
+		// UPDATE can't trip the (entity_name, content) uniqueness constraint.
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM kg_observations WHERE entity_name = ? AND content = ?`,
+			name, newC,
+		); err != nil {
+			return fmt.Errorf("knowledge: edit observation on %q: %w", name, err)
+		}
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE kg_observations SET content = ? WHERE entity_name = ? AND content = ?`,
+			newC, name, oldC,
+		); err != nil {
+			return fmt.Errorf("knowledge: edit observation on %q: %w", name, err)
 		}
 	}
 	if err := tx.Commit(); err != nil {
@@ -233,6 +373,74 @@ func (s *Store) DeleteRelations(ctx context.Context, rels []Relation) error {
 			strings.TrimSpace(r.From), strings.TrimSpace(r.To), strings.TrimSpace(r.RelationType),
 		); err != nil {
 			return fmt.Errorf("knowledge: delete relation: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("knowledge: commit: %w", err)
+	}
+	return nil
+}
+
+// RelationEdit rewrites one existing edge to a new triple — the unit the
+// editor uses to retype or retarget a relation in place rather than deleting
+// and re-adding it.
+type RelationEdit struct {
+	Old Relation `json:"old"`
+	New Relation `json:"new"`
+}
+
+// EditRelations rewrites specific edges in place. Each edit changes the Old
+// triple to the New one, keeping the underlying row. The New endpoints must
+// already exist and its type must be non-empty (same rules as CreateRelations);
+// an edit whose Old triple no longer matches is a silent no-op. An edit whose
+// New triple is identical to Old is skipped. If the New triple already exists
+// the pre-existing copy is folded into the edited row so the
+// (from_name, to_name, relation_type) uniqueness still holds.
+func (s *Store) EditRelations(ctx context.Context, edits []RelationEdit) error {
+	if len(edits) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("knowledge: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	for _, e := range edits {
+		oldFrom := strings.TrimSpace(e.Old.From)
+		oldTo := strings.TrimSpace(e.Old.To)
+		oldRel := strings.TrimSpace(e.Old.RelationType)
+		newFrom := strings.TrimSpace(e.New.From)
+		newTo := strings.TrimSpace(e.New.To)
+		newRel := strings.TrimSpace(e.New.RelationType)
+		if newRel == "" {
+			return fmt.Errorf("knowledge: relation type must not be empty")
+		}
+		if oldFrom == newFrom && oldTo == newTo && oldRel == newRel {
+			continue
+		}
+		for label, name := range map[string]string{"from": newFrom, "to": newTo} {
+			ok, err := entityExistsTx(ctx, tx, name)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				return fmt.Errorf("knowledge: %s entity %q does not exist; create it before relating", label, name)
+			}
+		}
+		// Drop any existing copy of the target triple first so the in-place
+		// UPDATE can't trip the (from_name, to_name, relation_type) uniqueness.
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM kg_relations WHERE from_name = ? AND to_name = ? AND relation_type = ?`,
+			newFrom, newTo, newRel,
+		); err != nil {
+			return fmt.Errorf("knowledge: edit relation: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE kg_relations SET from_name = ?, to_name = ?, relation_type = ?
+			 WHERE from_name = ? AND to_name = ? AND relation_type = ?`,
+			newFrom, newTo, newRel, oldFrom, oldTo, oldRel,
+		); err != nil {
+			return fmt.Errorf("knowledge: edit relation: %w", err)
 		}
 	}
 	if err := tx.Commit(); err != nil {

@@ -96,6 +96,148 @@ func TestDeleteObservations_RemovesFact(t *testing.T) {
 	assert.Equal(t, []string{"b"}, g.Entities[0].Observations)
 }
 
+func TestEditObservations_RewritesInPlace(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	_, err := s.CreateEntities(ctx, []Entity{{Name: "Tyr", Type: "person", Observations: []string{"a", "b", "c"}}})
+	require.NoError(t, err)
+	require.NoError(t, s.EditObservations(ctx, []ObservationEdit{
+		{EntityName: "Tyr", OldContent: "b", NewContent: "B!"},
+	}))
+	g, err := s.ReadGraph(ctx)
+	require.NoError(t, err)
+	require.Len(t, g.Entities, 1)
+	// The edited fact keeps its original position rather than moving to the end.
+	assert.Equal(t, []string{"a", "B!", "c"}, g.Entities[0].Observations)
+}
+
+func TestEditObservations_FoldsExistingDuplicate(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	_, err := s.CreateEntities(ctx, []Entity{{Name: "Tyr", Type: "person", Observations: []string{"a", "b"}}})
+	require.NoError(t, err)
+	// Editing "a" into "b" must not violate (entity_name, content) uniqueness;
+	// the pre-existing "b" is folded into the edited row, leaving a single "b".
+	require.NoError(t, s.EditObservations(ctx, []ObservationEdit{
+		{EntityName: "Tyr", OldContent: "a", NewContent: "b"},
+	}))
+	g, err := s.ReadGraph(ctx)
+	require.NoError(t, err)
+	require.Len(t, g.Entities, 1)
+	assert.Equal(t, []string{"b"}, g.Entities[0].Observations)
+}
+
+func TestEditObservations_RejectsEmptyNewContent(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	_, err := s.CreateEntities(ctx, []Entity{{Name: "Tyr", Type: "person", Observations: []string{"a"}}})
+	require.NoError(t, err)
+	err = s.EditObservations(ctx, []ObservationEdit{{EntityName: "Tyr", OldContent: "a", NewContent: "  "}})
+	require.Error(t, err)
+}
+
+func TestEditRelations_RetargetsAndRetypes(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	_, err := s.CreateEntities(ctx, []Entity{{Name: "A", Type: "p"}, {Name: "B", Type: "p"}, {Name: "C", Type: "p"}})
+	require.NoError(t, err)
+	_, err = s.CreateRelations(ctx, []Relation{{From: "A", To: "B", RelationType: "owns"}})
+	require.NoError(t, err)
+	require.NoError(t, s.EditRelations(ctx, []RelationEdit{{
+		Old: Relation{From: "A", To: "B", RelationType: "owns"},
+		New: Relation{From: "A", To: "C", RelationType: "loves"},
+	}}))
+	g, err := s.ReadGraph(ctx)
+	require.NoError(t, err)
+	require.Len(t, g.Relations, 1)
+	assert.Equal(t, Relation{From: "A", To: "C", RelationType: "loves"}, g.Relations[0])
+}
+
+func TestEditRelations_RejectsDanglingNewEndpoint(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	_, err := s.CreateEntities(ctx, []Entity{{Name: "A", Type: "p"}, {Name: "B", Type: "p"}})
+	require.NoError(t, err)
+	_, err = s.CreateRelations(ctx, []Relation{{From: "A", To: "B", RelationType: "owns"}})
+	require.NoError(t, err)
+	err = s.EditRelations(ctx, []RelationEdit{{
+		Old: Relation{From: "A", To: "B", RelationType: "owns"},
+		New: Relation{From: "A", To: "Ghost", RelationType: "owns"},
+	}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Ghost")
+}
+
+func TestEditRelations_FoldsExistingDuplicate(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	_, err := s.CreateEntities(ctx, []Entity{{Name: "A", Type: "p"}, {Name: "B", Type: "p"}})
+	require.NoError(t, err)
+	_, err = s.CreateRelations(ctx, []Relation{
+		{From: "A", To: "B", RelationType: "owns"},
+		{From: "A", To: "B", RelationType: "likes"},
+	})
+	require.NoError(t, err)
+	// Editing "owns" into the already-present "likes" must leave a single edge.
+	require.NoError(t, s.EditRelations(ctx, []RelationEdit{{
+		Old: Relation{From: "A", To: "B", RelationType: "owns"},
+		New: Relation{From: "A", To: "B", RelationType: "likes"},
+	}}))
+	g, err := s.ReadGraph(ctx)
+	require.NoError(t, err)
+	require.Len(t, g.Relations, 1)
+	assert.Equal(t, "likes", g.Relations[0].RelationType)
+}
+
+func TestEditEntities_RetypeOnly(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	_, err := s.CreateEntities(ctx, []Entity{{Name: "Tyr", Type: "person", Observations: []string{"a"}}})
+	require.NoError(t, err)
+	require.NoError(t, s.EditEntities(ctx, []EntityEdit{{Name: "Tyr", NewName: "Tyr", NewType: "wolf"}}))
+	g, err := s.ReadGraph(ctx)
+	require.NoError(t, err)
+	require.Len(t, g.Entities, 1)
+	assert.Equal(t, "wolf", g.Entities[0].Type)
+	assert.Equal(t, []string{"a"}, g.Entities[0].Observations)
+}
+
+func TestEditEntities_RenameRepointsObservationsAndRelations(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	_, err := s.CreateEntities(ctx, []Entity{
+		{Name: "A", Type: "person", Observations: []string{"likes tea"}},
+		{Name: "B", Type: "person"},
+	})
+	require.NoError(t, err)
+	_, err = s.CreateRelations(ctx, []Relation{{From: "A", To: "B", RelationType: "owns"}})
+	require.NoError(t, err)
+	require.NoError(t, s.EditEntities(ctx, []EntityEdit{{Name: "A", NewName: "Alpha", NewType: "person"}}))
+	g, err := s.ReadGraph(ctx)
+	require.NoError(t, err)
+	// A is gone; Alpha carries A's observations and the relation now starts at it.
+	var names []string
+	for _, e := range g.Entities {
+		names = append(names, e.Name)
+		if e.Name == "Alpha" {
+			assert.Equal(t, []string{"likes tea"}, e.Observations)
+		}
+	}
+	assert.Equal(t, []string{"Alpha", "B"}, names)
+	require.Len(t, g.Relations, 1)
+	assert.Equal(t, Relation{From: "Alpha", To: "B", RelationType: "owns"}, g.Relations[0])
+}
+
+func TestEditEntities_RejectsExistingTargetName(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	_, err := s.CreateEntities(ctx, []Entity{{Name: "A", Type: "p"}, {Name: "B", Type: "p"}})
+	require.NoError(t, err)
+	err = s.EditEntities(ctx, []EntityEdit{{Name: "A", NewName: "B", NewType: "p"}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "already exists")
+}
+
 func TestSearchNodes_MatchesAcrossFields(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()

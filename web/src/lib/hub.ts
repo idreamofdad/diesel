@@ -493,6 +493,12 @@ export async function createEntity(name: string, entityType: string): Promise<vo
   });
 }
 
+export async function editEntity(name: string, newName: string, newType: string): Promise<void> {
+  await knowledgePost('/api/v1/knowledge/entities/edit', {
+    edits: [{ name, newName, newType }],
+  });
+}
+
 export async function deleteEntity(name: string): Promise<void> {
   await knowledgePost('/api/v1/knowledge/entities/delete', { names: [name] });
 }
@@ -500,6 +506,16 @@ export async function deleteEntity(name: string): Promise<void> {
 export async function addObservation(entityName: string, content: string): Promise<void> {
   await knowledgePost('/api/v1/knowledge/observations', {
     observations: [{ entityName, contents: [content] }],
+  });
+}
+
+export async function editObservation(
+  entityName: string,
+  oldContent: string,
+  newContent: string,
+): Promise<void> {
+  await knowledgePost('/api/v1/knowledge/observations/edit', {
+    edits: [{ entityName, oldContent, newContent }],
   });
 }
 
@@ -512,6 +528,12 @@ export async function deleteObservation(entityName: string, content: string): Pr
 export async function createRelation(from: string, to: string, relationType: string): Promise<void> {
   await knowledgePost('/api/v1/knowledge/relations', {
     relations: [{ from, to, relationType }],
+  });
+}
+
+export async function editRelation(oldRel: KGRelation, newRel: KGRelation): Promise<void> {
+  await knowledgePost('/api/v1/knowledge/relations/edit', {
+    edits: [{ old: oldRel, new: newRel }],
   });
 }
 

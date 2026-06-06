@@ -7,7 +7,20 @@
   // simulation run on requestAnimationFrame, so there's no d3/npm footprint.
 
   import { onMount, onDestroy } from 'svelte';
-  import { fetchGraph, type KnowledgeGraph, type KGRelation } from './hub';
+  import {
+    fetchGraph,
+    createEntity,
+    editEntity,
+    deleteEntity,
+    addObservation,
+    editObservation,
+    deleteObservation,
+    createRelation,
+    editRelation,
+    deleteRelation,
+    type KnowledgeGraph,
+    type KGRelation,
+  } from './hub';
 
   let { onback }: { onback: () => void } = $props();
 
@@ -27,7 +40,30 @@
   let nodes = $state<Node[]>([]);
   let links = $state<Link[]>([]);
   let loadError = $state('');
+  let actionError = $state('');
   let selected = $state<number | null>(null);
+
+  // Side-panel observation editing state. newObs is the add-row input;
+  // editingObs holds the original text of the row being edited (its key),
+  // editText the in-progress replacement.
+  let newObs = $state('');
+  let editingObs = $state('');
+  let editText = $state('');
+  // Side-panel relation editing state. The add row relates the selected node
+  // (the "from") to newRelTarget; editingRel holds the original triple of the
+  // row being edited, with relEditType/relEditOther the in-progress values.
+  let newRelType = $state('');
+  let newRelTarget = $state('');
+  let editingRel = $state<KGRelation | null>(null);
+  let relEditType = $state('');
+  let relEditOther = $state('');
+  // Entity editing state. newName/newType drive the add-entity bar; editingEntity
+  // toggles the in-panel rename/retype form, with entName/entType its inputs.
+  let newName = $state('');
+  let newType = $state('');
+  let editingEntity = $state(false);
+  let entName = $state('');
+  let entType = $state('');
 
   let width = $state(800);
   let height = $state(600);
@@ -161,7 +197,11 @@
     e.preventDefault();
     dragging = i;
     nodes[i].fixed = true;
+    // Switching to a different bubble clears any in-progress edit. Reset after
+    // selected changes so otherNames (and the target default) track the new node.
+    const changed = selected !== i;
     selected = i;
+    if (changed) resetPanelForms();
     (e.target as Element).setPointerCapture(e.pointerId);
     restart();
   }
@@ -199,10 +239,218 @@
   });
 
   const sel = $derived(selected !== null ? nodes[selected] : null);
+  // Entities other than the selected one — relation targets, sorted by name.
+  const otherNames = $derived(
+    sel ? nodes.filter(n => n.name !== sel.name).map(n => n.name).sort() : [],
+  );
   function relsOf(name: string): KGRelation[] {
     return links
       .filter(l => nodes[l.s].name === name || nodes[l.t].name === name)
       .map(l => ({ from: nodes[l.s].name, to: nodes[l.t].name, relationType: l.rel }));
+  }
+  function relKey(r: KGRelation): string {
+    return `${r.from} ${r.relationType} ${r.to}`;
+  }
+
+  // ── Entity, observation & relation editing ──
+  // Mutations write straight through the REST API — the same graph the model
+  // reads each turn — then merge the fresh graph back in rather than calling
+  // load(): existing bubbles keep their simulated positions (reused by name),
+  // only genuinely new entities get seeded, and the selection is re-resolved by
+  // name so it survives a rename. A full rebuild would re-seed everything and
+  // drop the selection, jarring mid-edit.
+  async function refreshGraph(selectName?: string) {
+    const keep = selectName ?? (sel ? sel.name : null);
+    const g = await fetchGraph();
+    const existing = new Map(nodes.map(n => [n.name, n]));
+    const ns: Node[] = g.entities.map((e, i) => {
+      const obs = e.observations ?? [];
+      const r = 16 + Math.min(obs.length, 6) * 2;
+      const prev = existing.get(e.name);
+      if (prev) {
+        prev.type = e.entityType;
+        prev.obs = obs;
+        prev.r = r;
+        return prev;
+      }
+      // New entity — seed near the center so the sim pulls it into place.
+      const a = (i / Math.max(1, g.entities.length)) * Math.PI * 2;
+      return {
+        name: e.name, type: e.entityType, obs, r, fixed: false,
+        x: width / 2 + Math.cos(a) * 120, y: height / 2 + Math.sin(a) * 120,
+        vx: 0, vy: 0,
+      };
+    });
+    nodes = ns;
+    const idx = new Map(nodes.map((n, i) => [n.name, i]));
+    const ls: Link[] = [];
+    for (const r of g.relations) {
+      const s = idx.get(r.from);
+      const t = idx.get(r.to);
+      if (s !== undefined && t !== undefined) ls.push({ s, t, rel: r.relationType });
+    }
+    links = ls;
+    selected = keep != null && idx.has(keep) ? idx.get(keep)! : null;
+    restart();
+  }
+
+  // run wraps a mutation: perform it, then refresh. selectAfter names the entity
+  // to leave selected (e.g. a newly added or renamed one); without it the
+  // current selection is preserved by name.
+  async function run(fn: () => Promise<void>, selectAfter?: string) {
+    actionError = '';
+    try {
+      await fn();
+      await refreshGraph(selectAfter);
+    } catch (e) {
+      actionError = (e as Error).message;
+    }
+  }
+
+  function resetPanelForms() {
+    newObs = '';
+    editingObs = '';
+    editText = '';
+    newRelType = '';
+    newRelTarget = otherNames[0] ?? '';
+    editingRel = null;
+    relEditType = '';
+    relEditOther = '';
+    editingEntity = false;
+    entName = '';
+    entType = '';
+    actionError = '';
+  }
+
+  async function addObs() {
+    const content = newObs.trim();
+    if (!content || !sel) return;
+    const entity = sel.name;
+    await run(() => addObservation(entity, content));
+    newObs = '';
+  }
+
+  function startEdit(obs: string) {
+    editingObs = obs;
+    editText = obs;
+    actionError = '';
+  }
+
+  function cancelEdit() {
+    editingObs = '';
+    editText = '';
+  }
+
+  // saveObs rewrites the edited observation in place; unchanged or empty text
+  // just closes the editor.
+  async function saveObs() {
+    const orig = editingObs;
+    const next = editText.trim();
+    if (!orig || !sel) return;
+    if (!next || next === orig) {
+      cancelEdit();
+      return;
+    }
+    const entity = sel.name;
+    await run(() => editObservation(entity, orig, next));
+    cancelEdit();
+  }
+
+  async function removeObs(obs: string) {
+    if (!sel) return;
+    const entity = sel.name;
+    await run(() => deleteObservation(entity, obs));
+  }
+
+  // A relation in the panel runs from the selected node out to relTarget. Edits
+  // keep the original direction: relEditOther replaces whichever endpoint isn't
+  // the selected node.
+  async function addRel() {
+    const rt = newRelType.trim();
+    if (!rt || !newRelTarget || !sel) return;
+    const from = sel.name;
+    await run(() => createRelation(from, newRelTarget, rt));
+    newRelType = '';
+  }
+
+  function startRelEdit(r: KGRelation) {
+    editingRel = r;
+    relEditType = r.relationType;
+    relEditOther = r.from === sel?.name ? r.to : r.from;
+    actionError = '';
+  }
+
+  function cancelRelEdit() {
+    editingRel = null;
+    relEditType = '';
+    relEditOther = '';
+  }
+
+  async function saveRel() {
+    const orig = editingRel;
+    const rt = relEditType.trim();
+    if (!orig || !sel || !rt || !relEditOther) return;
+    // Preserve direction: if the selected node was the source, it stays the
+    // source and relEditOther becomes the target, and vice versa.
+    const outgoing = orig.from === sel.name;
+    const next: KGRelation = outgoing
+      ? { from: sel.name, to: relEditOther, relationType: rt }
+      : { from: relEditOther, to: sel.name, relationType: rt };
+    if (next.from === orig.from && next.to === orig.to && next.relationType === orig.relationType) {
+      cancelRelEdit();
+      return;
+    }
+    await run(() => editRelation(orig, next));
+    cancelRelEdit();
+  }
+
+  async function removeRel(r: KGRelation) {
+    await run(() => deleteRelation(r));
+  }
+
+  // ── Entities ──
+  async function addEntity() {
+    const name = newName.trim();
+    if (!name) return;
+    const type = newType.trim();
+    // Select the new bubble so its (empty) panel is ready to fill in.
+    await run(() => createEntity(name, type), name);
+    newName = '';
+    newType = '';
+  }
+
+  function startEntityEdit() {
+    if (!sel) return;
+    editingEntity = true;
+    entName = sel.name;
+    entType = sel.type;
+    actionError = '';
+  }
+
+  function cancelEntityEdit() {
+    editingEntity = false;
+    entName = '';
+    entType = '';
+  }
+
+  async function saveEntity() {
+    if (!sel) return;
+    const name = entName.trim();
+    const type = entType.trim();
+    if (!name) return;
+    if (name === sel.name && type === sel.type) {
+      cancelEntityEdit();
+      return;
+    }
+    const oldName = sel.name;
+    // Keep the renamed entity selected via its new name.
+    await run(() => editEntity(oldName, name, type), name);
+    cancelEntityEdit();
+  }
+
+  async function removeEntity(name: string) {
+    if (!confirm(`Delete "${name}" and all its observations and relations?`)) return;
+    await run(() => deleteEntity(name));
   }
 </script>
 
@@ -213,6 +461,14 @@
     <div class="spacer"></div>
     <button onclick={load} title="Reload">⟳ Reload</button>
   </header>
+
+  <div class="addbar">
+    <input placeholder="Name, e.g. Tyr Mactire" bind:value={newName}
+      onkeydown={(e) => e.key === 'Enter' && addEntity()} />
+    <input placeholder="Type, e.g. person" bind:value={newType}
+      onkeydown={(e) => e.key === 'Enter' && addEntity()} />
+    <button onclick={addEntity} disabled={!newName.trim()}>Add entity</button>
+  </div>
 
   {#if loadError}
     <p class="error">{loadError}</p>
@@ -250,17 +506,89 @@
 
     {#if sel}
       <aside class="panel">
-        <h3>{sel.name}</h3>
-        <div class="type" style="color:{colorFor(sel.type)}">{sel.type}</div>
+        {#if editingEntity}
+          <div class="entedit">
+            <input class="entname" placeholder="Name" bind:value={entName}
+              onkeydown={(e) => {
+                if (e.key === 'Enter') saveEntity();
+                else if (e.key === 'Escape') cancelEntityEdit();
+              }} />
+            <input class="enttype" placeholder="Type" bind:value={entType}
+              onkeydown={(e) => {
+                if (e.key === 'Enter') saveEntity();
+                else if (e.key === 'Escape') cancelEntityEdit();
+              }} />
+            <button class="act" title="Save" onclick={saveEntity} disabled={!entName.trim()}>✓</button>
+            <button class="act" title="Cancel" onclick={cancelEntityEdit}>↩</button>
+          </div>
+        {:else}
+          <div class="panelhead">
+            <h3>{sel.name}</h3>
+            <button class="act" title="Rename / retype entity" onclick={startEntityEdit}>✎</button>
+            <button class="act del" title="Delete entity" onclick={() => removeEntity(sel.name)}>✕</button>
+          </div>
+          <div class="type" style="color:{colorFor(sel.type)}">{sel.type}</div>
+        {/if}
         <div class="sec">Observations</div>
         {#if sel.obs.length === 0}<p class="muted">(none)</p>{/if}
-        <ul>
-          {#each sel.obs as o (o)}<li>{o}</li>{/each}
-        </ul>
-        <div class="sec">Relations</div>
-        {#each relsOf(sel.name) as r (r.from + r.relationType + r.to)}
-          <div class="rel">{r.from} —{r.relationType}→ {r.to}</div>
+        {#each sel.obs as o (o)}
+          <div class="orow">
+            {#if editingObs === o}
+              <input class="oedit" bind:value={editText}
+                onkeydown={(e) => {
+                  if (e.key === 'Enter') saveObs();
+                  else if (e.key === 'Escape') cancelEdit();
+                }} />
+              <button class="act" title="Save" onclick={saveObs} disabled={!editText.trim()}>✓</button>
+              <button class="act" title="Cancel" onclick={cancelEdit}>↩</button>
+            {:else}
+              <span class="otext">{o}</span>
+              <button class="act" title="Edit observation" onclick={() => startEdit(o)}>✎</button>
+              <button class="act del" title="Delete observation" onclick={() => removeObs(o)}>✕</button>
+            {/if}
+          </div>
         {/each}
+        <div class="oadd">
+          <input placeholder="New observation…" bind:value={newObs}
+            onkeydown={(e) => e.key === 'Enter' && addObs()} />
+          <button onclick={addObs} disabled={!newObs.trim()}>Add</button>
+        </div>
+        {#if actionError}<p class="error panelerror">{actionError}</p>{/if}
+
+        <div class="sec">Relations</div>
+        {#if relsOf(sel.name).length === 0}<p class="muted">(none)</p>{/if}
+        {#each relsOf(sel.name) as r (relKey(r))}
+          <div class="orow">
+            {#if editingRel && relKey(editingRel) === relKey(r)}
+              <span class="reldir" title={r.from === sel.name ? 'outgoing' : 'incoming'}
+                >{r.from === sel.name ? '→' : '←'}</span>
+              <input class="reltype" placeholder="relation" bind:value={relEditType}
+                onkeydown={(e) => {
+                  if (e.key === 'Enter') saveRel();
+                  else if (e.key === 'Escape') cancelRelEdit();
+                }} />
+              <select bind:value={relEditOther}>
+                {#each otherNames as n (n)}<option value={n}>{n}</option>{/each}
+              </select>
+              <button class="act" title="Save" onclick={saveRel}
+                disabled={!relEditType.trim() || !relEditOther}>✓</button>
+              <button class="act" title="Cancel" onclick={cancelRelEdit}>↩</button>
+            {:else}
+              <span class="otext">{r.from} —{r.relationType}→ {r.to}</span>
+              <button class="act" title="Edit relation" onclick={() => startRelEdit(r)}>✎</button>
+              <button class="act del" title="Delete relation" onclick={() => removeRel(r)}>✕</button>
+            {/if}
+          </div>
+        {/each}
+        <div class="oadd reladd">
+          <span class="reldir" title="outgoing">→</span>
+          <input class="reltype" placeholder="relation (e.g. owns)" bind:value={newRelType}
+            onkeydown={(e) => e.key === 'Enter' && addRel()} />
+          <select bind:value={newRelTarget} disabled={otherNames.length === 0}>
+            {#each otherNames as n (n)}<option value={n}>{n}</option>{/each}
+          </select>
+          <button onclick={addRel} disabled={!newRelType.trim() || !newRelTarget}>Add</button>
+        </div>
       </aside>
     {/if}
   </div>
@@ -283,6 +611,15 @@
   header h2 { margin: 0; font-size: 1.05rem; }
   .spacer { flex: 1 1 auto; }
   .back { background: transparent; }
+
+  .addbar {
+    flex: 0 0 auto;
+    display: flex;
+    gap: 0.5rem;
+    padding: 0.5rem 1rem;
+    border-bottom: 1px solid var(--border);
+  }
+  .addbar input { flex: 1 1 auto; min-width: 0; }
 
   .error { color: #e06c6c; padding: 0.5rem 1rem; }
   .empty { color: var(--muted); padding: 0.5rem 1rem; }
@@ -339,6 +676,21 @@
   }
   .panel h3 { margin: 0; font-size: 1rem; }
   .panel .type { font-size: 0.8rem; margin-bottom: 0.4rem; }
+  .panelhead {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+  }
+  .panelhead h3 { flex: 1 1 auto; word-break: break-word; }
+  .entedit {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.3rem;
+    margin-bottom: 0.4rem;
+  }
+  .entname { flex: 1 1 8rem; min-width: 0; padding: 0.25rem 0.4rem; font-size: 0.85rem; }
+  .enttype { flex: 1 1 6rem; min-width: 0; padding: 0.25rem 0.4rem; font-size: 0.82rem; }
   .sec {
     margin-top: 0.7rem;
     font-size: 0.72rem;
@@ -348,8 +700,44 @@
     border-top: 1px solid var(--border);
     padding-top: 0.5rem;
   }
-  .panel ul { margin: 0.3rem 0; padding-left: 1.1rem; }
-  .panel li { font-size: 0.85rem; margin: 0.15rem 0; }
-  .rel { font-size: 0.82rem; margin: 0.15rem 0; word-break: break-word; }
   .muted { color: var(--muted); font-size: 0.85rem; margin: 0.2rem 0; }
+
+  .orow {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.25rem;
+    margin: 0.15rem 0;
+  }
+  .otext { flex: 1 1 auto; font-size: 0.85rem; word-break: break-word; }
+  .oedit { flex: 1 1 auto; min-width: 0; padding: 0.25rem 0.4rem; font-size: 0.85rem; }
+  .oadd {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem;
+    margin-top: 0.4rem;
+  }
+  .oadd input { flex: 1 1 auto; min-width: 0; padding: 0.3rem 0.4rem; font-size: 0.85rem; }
+  .oadd button { padding: 0.3rem 0.6rem; font-size: 0.82rem; }
+  .reldir { flex: 0 0 auto; color: var(--muted); font-size: 0.85rem; }
+  .reltype { flex: 1 1 5rem; min-width: 0; padding: 0.25rem 0.4rem; font-size: 0.82rem; }
+  .panel select {
+    flex: 1 1 5rem;
+    min-width: 0;
+    padding: 0.25rem 0.2rem;
+    font-size: 0.82rem;
+  }
+  .act {
+    flex: 0 0 auto;
+    background: transparent;
+    border: 0;
+    color: var(--muted);
+    padding: 0.05rem 0.3rem;
+    font-size: 0.82rem;
+    line-height: 1;
+    cursor: pointer;
+  }
+  .act:hover:not(:disabled) { background: transparent; color: var(--text); }
+  .act.del:hover:not(:disabled) { color: #e06c6c; }
+  .panelerror { padding: 0.4rem 0 0; font-size: 0.8rem; }
 </style>

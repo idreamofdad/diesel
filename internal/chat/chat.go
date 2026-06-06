@@ -35,11 +35,12 @@ const (
 	RoleTool = "tool"
 )
 
-// maxToolIterations bounds how many rounds of tool calls a single turn may
-// make before we force a final answer. A confused model that keeps calling
-// tools can't loop forever or rack up unbounded latency; after this many
-// rounds we ask once more with no tools and a strict schema.
-const maxToolIterations = 5
+// maxMemoryRounds bounds how many rounds of write-tool calls one memory pass
+// may make before we stop it. A confused model that keeps calling tools can't
+// loop forever or rack up unbounded background work; after this many rounds we
+// give up on the pass. (The reply path advertises no tools, so this cap is the
+// memory pass's alone.)
+const maxMemoryRounds = 10
 
 // knowledgeTokenWarn is the rough token size of the injected graph blob past
 // which we log a warning. The graph is persistent memory and only grows, so
@@ -282,9 +283,9 @@ func Completion(ctx context.Context, s settings.AppSettings, history []Message, 
 const memoryHistoryMessages = 20
 
 // memoryInstruction steers the second-pass model: look at the conversation it
-// just had and record anything durable through the write tools. It's appended
-// as the final system message of the memory pass, after the persona + graph +
-// history that assembleMessages already laid down. It's deliberately concrete
+// just had and record anything durable through the write tools. It's carried in
+// the memory pass's single user turn, right after the transcript it refers to
+// (the graph rides separately as system context). It's deliberately concrete
 // and example-driven — small local models follow a worked example far more
 // reliably than abstract rules.
 const memoryInstruction = `# Updating your memory
@@ -292,9 +293,9 @@ const memoryInstruction = `# Updating your memory
 You are now updating your own long-term memory based on the conversation above. This is a background step — do NOT write a chat reply, do NOT explain or reason out loud, just call the tools. Go straight to the right tool calls; the worked example below is all the guidance you need.
 
 Your memory is a knowledge graph of three things:
-- ENTITIES — the people, animals, places, and things you know. Each has a unique name and a type (e.g. name "Tyr Mactire", type "person"; name "Beckett", type "cat").
-- OBSERVATIONS — short factual notes attached to one entity (e.g. on "Tyr Mactire": "works at McDonalds").
-- RELATIONS — directed links between two entities, written in active voice (e.g. "Tyr Mactire" —owns→ "Beckett").
+- ENTITIES — the people, animals, places, and things you know. Each has a unique name and a type (e.g. name "{first_name} {last_name}", type "person"; name "{pet_name}", type "cat").
+- OBSERVATIONS — short factual notes attached to one entity (e.g. on "{first_name} {last_name}": "works at McDonalds").
+- RELATIONS — directed links between two entities, written in active voice (e.g. "{first_name} {last_name}" —owns→ "{pet_name}").
 
 You have these tools:
 - create_entities — add new entities. Pass each as {name, entityType, observations:[]}. Re-using a name just merges in new observations, so it's safe.
@@ -302,20 +303,24 @@ You have these tools:
 - create_relations — link two entities that BOTH already exist. Pass {from, to, relationType}. If an endpoint doesn't exist yet, create it first or the call is rejected.
 - delete_entities / delete_observations / delete_relations — remove things that are now wrong, irrelevant, or contradicted.
 
-Worked example — if the user said "I'm Tyr Mactire, I work at McDonalds, and I have a cat named Beckett", you would call:
-1. create_entities: [{name:"Tyr Mactire", entityType:"person", observations:["works at McDonalds"]}, {name:"Beckett", entityType:"cat", observations:[]}]
-2. create_relations: [{from:"Tyr Mactire", to:"Beckett", relationType:"owns"}]
+Worked example — if the user said "I'm {first_name} {last_name}, I work at McDonalds, and I have a cat named {pet_name}", you would call:
+1. create_entities: [{name:"{first_name} {last_name}", entityType:"person", observations:["works at McDonalds"]}, {name:"{pet_name}", entityType:"cat", observations:[]}]
+2. create_relations: [{from:"{first_name} {last_name}", to:"{pet_name}", relationType:"owns"}]
+
+Counter-example — if the user said "ugh, rough day at work, I'm wiped, gonna crash early" and the graph already knows {first_name} works at McDonalds, you call NOTHING. The bad mood and being tired are passing, and the job is already on record. Calling no tools is the most common correct outcome — most turns add nothing durable.
 
 Rules:
 - Don't think step by step or narrate what you're doing — read the conversation, then act with tool calls directly.
-- Only record DURABLE facts (names, jobs, relationships, pets, where someone lives, lasting preferences). Ignore small talk and passing moods.
-- Check the graph above first — don't re-create entities or re-add observations that are already there.
+- Default to doing nothing. Recording too much is worse than recording too little: clutter buries the facts that matter. Only reach for a tool when a clearly durable, genuinely new fact appeared.
+- DURABLE means it would still be true and worth knowing weeks from now: names, jobs, relationships, pets, where someone lives, lasting preferences. NOT durable, so ignore it entirely: moods, what someone did or felt today, plans for tonight, small talk, one-off events, opinions said in passing.
+- Check the graph above before writing anything. If a fact is already there — even worded differently — do nothing. Don't re-create an entity that exists, don't re-add an observation that's present, and don't add a near-duplicate (e.g. "has a cat" when "owns {pet_name}, a cat" is already recorded).
+- You already know everything in your background above — your own life and work, your relationship with {first_name} {last_name}, the people and pets it describes. None of that gets recorded; it's part of who you are, not something you just learned. Only record NEW facts {first_name} gives you that go beyond both your background and the graph.
 - Create entities before relating them.
-- If a new fact contradicts an old one, delete the stale piece and add the correct one.
-- If nothing new and durable came up, call no tools at all.
+- If a new fact genuinely contradicts an old one, delete the stale piece and add the correct one.
+- If nothing new and durable came up — the common case — call no tools at all.
 
 Understandings:
-- The user may call you "dad" or "daddy" — that's the role you've grown into, not a literal family relationship.
+- {first_name} may call you "dad" or "daddy" — that's the role you've grown into, not a literal family relationship.
 `
 
 // MemoryPass is the second pass of the turn: after the user already has their
@@ -358,10 +363,17 @@ func MemoryPass(ctx context.Context, s settings.AppSettings, history []Message, 
 		return nil
 	}
 
-	msgs := memoryMessages(ctx, history, kb)
+	msgs := memoryMessages(ctx, s, history, kb)
 
 	rounds := 0
-	for iter := 0; iter < maxToolIterations; iter++ {
+	for iter := 0; iter < maxMemoryRounds; iter++ {
+		// A newer turn supersedes this pass by cancelling ctx — stop cleanly
+		// between rounds rather than firing another doomed request. This is the
+		// "reset": the next turn's pass starts the round count over from zero.
+		if ctx.Err() != nil {
+			logger.Debug().Msgf("memory pass superseded after %d round(s)", rounds)
+			return nil
+		}
 		// Tools-only, no schema, reasoning DISABLED. A thinking model left to
 		// reason here tends to spend the turn emitting a <think> block and
 		// return no tool calls at all; with thinking off it goes straight to
@@ -370,6 +382,12 @@ func MemoryPass(ctx context.Context, s settings.AppSettings, history []Message, 
 		logger.Debug().Msgf("memory round %d request: tools=%d messages=%d", iter, len(tools), len(msgs))
 		choice, _, status, err := callLLM(ctx, s, endpoint, body)
 		if err != nil {
+			// A cancel mid-request surfaces as a transport error; that's the
+			// supersede path, not a real failure, so don't log it as one.
+			if ctx.Err() != nil {
+				logger.Debug().Msgf("memory pass superseded mid-request after %d round(s)", rounds)
+				return nil
+			}
 			logger.Debug().Err(err).Msgf("memory round %d error: status=%d", iter, status)
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
@@ -395,20 +413,35 @@ func MemoryPass(ctx context.Context, s settings.AppSettings, history []Message, 
 			msgs = append(msgs, wireMsg{Role: RoleTool, ToolCallID: tc.ID, Content: result})
 		}
 	}
-	logger.Debug().Msgf("memory pass hit the %d-round cap", maxToolIterations)
+	logger.Debug().Msgf("memory pass hit the %d-round cap", maxMemoryRounds)
 	span.SetAttributes(attribute.Int("llm.memory.rounds", rounds))
 	return nil
 }
 
-// memoryMessages builds the focused prompt for the memory pass. It deliberately
-// does NOT reuse the reply assembly: the full Diesel persona ("you are Diesel,
-// reply in 1–3 sentences, never break character") fights the extraction task
-// and pushes a small model into producing an in-character chat reply instead of
-// tool calls. Here the model sees only its current memory, a plain transcript
-// of the recent exchange, and the how-to instruction — nothing telling it to
-// converse.
-func memoryMessages(ctx context.Context, history []Message, kb KnowledgeBase) []wireMsg {
-	msgs := make([]wireMsg, 0, 3)
+// memoryMessages builds the focused prompt for the memory pass: the persona, the
+// current memory graph, a plain transcript of the recent exchange, and the
+// how-to instruction. The persona rides first, but framed as reference context
+// ("this is what you already know — don't record it"), NOT as a directive to
+// converse. It earns its place by killing duplicates: without it the model can't
+// tell which facts are already baked into who Diesel is (the user's job, the
+// cat, the relationship) and re-records them as observations every turn. The
+// framing prefix and the memoryInstruction both stress this step is tool-calls
+// only, to keep the persona's "reply in 1–3 sentences, stay in character" pull
+// from turning the pass back into a chat reply.
+func memoryMessages(ctx context.Context, s settings.AppSettings, history []Message, kb KnowledgeBase) []wireMsg {
+	msgs := make([]wireMsg, 0, 4)
+
+	// The persona is reference, not a role to perform: the label leads with
+	// "you're not chatting right now" precisely because the persona itself says
+	// to converse, and says nothing here should ever be recorded.
+	msgs = append(msgs, wireMsg{
+		Role: RoleSystem,
+		Content: settings.ApplyNames(s, "For reference only — this is who you are, the background you already know by heart. "+
+			"You are NOT being asked to chat or stay in character right now; your only job this step is to "+
+			"call the memory tools (or none). Nothing in this background should ever be recorded as memory — "+
+			"it's already part of you. It's here so you can tell what you already know apart from anything "+
+			"genuinely new {first_name} {last_name} said:\n\n") + settings.RenderSystemPrompt(s),
+	})
 
 	if graph, err := kb.GraphJSON(ctx); err == nil && graph != "" {
 		msgs = append(msgs, wireMsg{
@@ -418,7 +451,14 @@ func memoryMessages(ctx context.Context, history []Message, kb KnowledgeBase) []
 	}
 
 	// Render the recent turns as a plain transcript so the model treats them as
-	// material to extract from, not a conversation to continue.
+	// material to extract from, not a conversation to continue. The user's lines
+	// carry their real name (matching their graph entity) rather than a generic
+	// "User:", so the model attaches facts to the right entity without guessing.
+	userLabel := strings.TrimSpace(s.FirstName + " " + s.LastName)
+	if userLabel == "" {
+		userLabel = "User"
+	}
+	userLabel += ": "
 	start := 0
 	if len(history) > memoryHistoryMessages {
 		start = len(history) - memoryHistoryMessages
@@ -427,7 +467,7 @@ func memoryMessages(ctx context.Context, history []Message, kb KnowledgeBase) []
 	for _, m := range history[start:] {
 		switch m.Role {
 		case RoleUser:
-			b.WriteString("User: ")
+			b.WriteString(userLabel)
 		case RoleAssistant:
 			b.WriteString("Diesel: ")
 		default:
@@ -436,12 +476,20 @@ func memoryMessages(ctx context.Context, history []Message, kb KnowledgeBase) []
 		b.WriteString(strings.TrimSpace(m.Content))
 		b.WriteByte('\n')
 	}
-	msgs = append(msgs, wireMsg{
-		Role:    RoleSystem,
-		Content: "Conversation to review (most recent last):\n\n" + b.String(),
-	})
 
-	msgs = append(msgs, wireMsg{Role: RoleSystem, Content: memoryInstruction})
+	// The transcript-to-review and the how-to instruction ride together as the
+	// single USER turn. Everything else here is system context (the persona and
+	// the graph), and a request with no user message at all makes strict chat
+	// templates 400 with "No user query found in messages" — which is exactly what
+	// a separately configured tools model with a stricter template does. Folding
+	// them into one user turn also leaves a user message last, which templates
+	// expect before they generate. ApplyNames swaps the {first_name}/{last_name}
+	// placeholders in the instruction for the configured names.
+	msgs = append(msgs, wireMsg{
+		Role: RoleUser,
+		Content: "Conversation to review (most recent last):\n\n" + b.String() +
+			"\n\n" + settings.ApplyNames(s, memoryInstruction),
+	})
 	return msgs
 }
 

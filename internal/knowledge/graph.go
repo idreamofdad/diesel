@@ -7,7 +7,7 @@
 // clients (Claude Desktop, …) feel at home when they connect to the HTTP
 // listener: entities are typed, named nodes; observations are free-text
 // facts hung off an entity; relations are directed, typed edges named in
-// active voice ("Tyr" —owns→ "Beckett").
+// active voice ("{first_name}" —owns→ "{pet_name}").
 //
 // The graph lives in the same SQLite database as the rest of Diesel's state
 // (see the kg_* tables in storage's migrations). This package owns its own
@@ -26,8 +26,8 @@ type Entity struct {
 }
 
 // Relation is a directed, typed edge between two entities, named in active
-// voice so the triple reads as a sentence: from ("Tyr") + relationType
-// ("owns") + to ("Beckett").
+// voice so the triple reads as a sentence: from ("{first_name}") + relationType
+// ("owns") + to ("{pet_name}").
 type Relation struct {
 	From         string `json:"from"`
 	To           string `json:"to"`

@@ -297,11 +297,20 @@ func (s AppSettings) IdentityConfigured() bool {
 // const, intentionally. Callers should only invoke this when
 // IdentityConfigured() is true; empty fields render as visible holes.
 func RenderSystemPrompt(s AppSettings) string {
+	return ApplyNames(s, systemPrompt)
+}
+
+// ApplyNames substitutes the {first_name}/{last_name}/{pet_name} placeholders in
+// text with the configured names — the same templating RenderSystemPrompt applies
+// to the persona, factored out so other prompts (e.g. the memory pass) can address
+// the user by their real name instead of a generic "the user". Already-rendered
+// text passes through untouched (no placeholders left to replace).
+func ApplyNames(s AppSettings, text string) string {
 	return strings.NewReplacer(
 		"{first_name}", s.FirstName,
 		"{last_name}", s.LastName,
 		"{pet_name}", s.PetName,
-	).Replace(systemPrompt)
+	).Replace(text)
 }
 
 // ResolveToolModel returns the endpoint, API key, and model the memory pass

@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	"diesel/internal/knowledge"
+	"diesel/internal/settings"
+	"diesel/internal/util"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
@@ -170,8 +172,10 @@ func showKnowledgeDialog(win fyne.Window, knMgr *knowledge.Service) {
 
 	// ── Toolbar ──
 	addEntityBtn := widget.NewButton("Add entity", func() {
+		set := settings.Load()
+		exName := strings.TrimSpace(util.FirstNonEmpty(set.FirstName, "Ada") + " " + util.FirstNonEmpty(set.LastName, "Lovelace"))
 		name := widget.NewEntry()
-		name.SetPlaceHolder("Name, e.g. Tyr Mactire")
+		name.SetPlaceHolder("Name, e.g. " + exName)
 		etype := widget.NewEntry()
 		etype.SetPlaceHolder("Type, e.g. person")
 		form := dialog.NewForm("Add entity", "Add", "Cancel",

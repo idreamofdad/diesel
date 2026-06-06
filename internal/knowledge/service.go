@@ -58,10 +58,12 @@ func httpConfigFrom(s settings.AppSettings) httpConfig {
 
 // New builds the service: it wires the SQLite-backed graph store, the MCP
 // server, and the in-memory client session used for the model's tool calls.
-// The HTTP listener is not started here — call Apply for that.
-func New(store *storage.Store) (*Service, error) {
+// The HTTP listener is not started here — call Apply for that. s seeds the
+// example names baked into the server's instructions and tool descriptions
+// (a snapshot — a later name change needs a restart to surface).
+func New(store *storage.Store, s settings.AppSettings) (*Service, error) {
 	kn := NewStore(store.SQLDB())
-	server := NewServer(kn)
+	server := NewServer(kn, s)
 
 	// Connect server and client over a paired in-memory transport. Both
 	// sessions run for the whole app; Stop closes them.
