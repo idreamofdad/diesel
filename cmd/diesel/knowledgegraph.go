@@ -5,6 +5,7 @@ import (
 	"image/color"
 	"math"
 	"strings"
+	"sync"
 	"time"
 
 	"diesel/internal/knowledge"
@@ -15,6 +16,10 @@ import (
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
+	"golang.org/x/image/font"
+	"golang.org/x/image/font/gofont/goregular"
+	"golang.org/x/image/font/opentype"
+	"golang.org/x/image/math/fixed"
 	"golang.org/x/image/vector"
 )
 
@@ -224,14 +229,7 @@ func (g *graphWidget) setGraph(kg knowledge.Graph) {
 }
 
 func (g *graphWidget) CreateRenderer() fyne.WidgetRenderer {
-	raster := canvas.NewRaster(g.draw)
-	labels := make([]*canvas.Text, 3)
-	for i := range labels {
-		t := canvas.NewText("", theme.Color(theme.ColorNameForeground))
-		t.TextSize = theme.CaptionTextSize()
-		labels[i] = t
-	}
-	g.renderer = &graphRenderer{g: g, raster: raster, labels: labels}
+	g.renderer = &graphRenderer{g: g, raster: canvas.NewRaster(g.draw)}
 	return g.renderer
 }
 
@@ -466,7 +464,70 @@ func (g *graphWidget) draw(w, h int) image.Image {
 		}
 		fillCircle(ras, img, cx, cy, rad, colorForType(n.typ))
 	}
+
+	// Every node's name, centered just below its bubble. Drawn into the raster
+	// (not as canvas.Text) so hundreds stay cheap and pan/zoom with the graph.
+	if face := labelFace(11 * ppd); face != nil {
+		fg := theme.Color(theme.ColorNameForeground)
+		for i := range g.nodes {
+			n := g.nodes[i]
+			cx, cy := tx(n.x, n.y)
+			col := fg
+			if i == g.match {
+				col = matchCol
+			}
+			drawLabel(img, face, n.name, cx, cy+float32(n.r*g.scale*ppd)+float32(2*ppd), col)
+		}
+	}
 	return img
+}
+
+var (
+	labelFontOnce sync.Once
+	labelFont     *opentype.Font
+	labelFaceMu   sync.Mutex
+	labelFaces    = map[int]font.Face{}
+)
+
+// labelFace returns a cached Go-font face at the given pixel height. The graph
+// draws into a device-pixel image, so callers pass the DP size times
+// pixels-per-DP. Returns nil if the bundled font can't be loaded.
+func labelFace(px float64) font.Face {
+	labelFontOnce.Do(func() {
+		if f, err := opentype.Parse(goregular.TTF); err == nil {
+			labelFont = f
+		}
+	})
+	if labelFont == nil {
+		return nil
+	}
+	size := int(math.Round(px))
+	if size < 6 {
+		size = 6
+	}
+	labelFaceMu.Lock()
+	defer labelFaceMu.Unlock()
+	if f, ok := labelFaces[size]; ok {
+		return f
+	}
+	f, err := opentype.NewFace(labelFont, &opentype.FaceOptions{Size: float64(size), DPI: 72, Hinting: font.HintingFull})
+	if err != nil {
+		return nil
+	}
+	labelFaces[size] = f
+	return f
+}
+
+// drawLabel renders s into dst, centered horizontally on cx with its top at top.
+func drawLabel(dst *image.RGBA, face font.Face, s string, cx, top float32, col color.Color) {
+	if s == "" {
+		return
+	}
+	w := font.MeasureString(face, s).Ceil()
+	asc := face.Metrics().Ascent.Ceil()
+	d := &font.Drawer{Dst: dst, Src: image.NewUniform(col), Face: face}
+	d.Dot = fixed.P(int(cx)-w/2, int(top)+asc)
+	d.DrawString(s)
 }
 
 // fillCircle rasterizes an antialiased filled circle, compositing only within
@@ -574,11 +635,11 @@ func clampF(v, lo, hi float64) float64 {
 	return v
 }
 
-// graphRenderer draws the raster full-bleed and floats the (few) labels over it.
+// graphRenderer draws the whole graph — bubbles, edges, and labels — into a
+// single full-bleed raster.
 type graphRenderer struct {
 	g      *graphWidget
 	raster *canvas.Raster
-	labels []*canvas.Text
 }
 
 func (r *graphRenderer) Destroy() { r.g.stopSim() }
@@ -596,7 +657,6 @@ func (r *graphRenderer) Layout(size fyne.Size) {
 		g.autofit()
 		g.fitted = true
 	}
-	r.updateLabels()
 	// Force the raster to regenerate with the now-valid size/transform. Without
 	// this the view keeps showing the pre-size (empty) image once the sim has
 	// settled — the cause of the blank graph after the first toggle.
@@ -606,58 +666,7 @@ func (r *graphRenderer) Layout(size fyne.Size) {
 func (r *graphRenderer) MinSize() fyne.Size { return fyne.NewSize(360, 360) }
 
 func (r *graphRenderer) Objects() []fyne.CanvasObject {
-	objs := make([]fyne.CanvasObject, 0, 1+len(r.labels))
-	objs = append(objs, r.raster)
-	for _, t := range r.labels {
-		objs = append(objs, t)
-	}
-	return objs
+	return []fyne.CanvasObject{r.raster}
 }
 
-func (r *graphRenderer) Refresh() {
-	r.updateLabels()
-	canvas.Refresh(r.raster)
-}
-
-// updateLabels names only the selected, hovered, and searched bubbles, reusing
-// a small fixed pool of text objects (blanked when unused).
-func (r *graphRenderer) updateLabels() {
-	g := r.g
-	want := make([]int, 0, len(r.labels))
-	add := func(i int) {
-		if i < 0 || i >= len(g.nodes) || len(want) >= len(r.labels) {
-			return
-		}
-		for _, w := range want {
-			if w == i {
-				return
-			}
-		}
-		want = append(want, i)
-	}
-	add(g.selected)
-	add(g.hovered)
-	add(g.match)
-
-	for k, t := range r.labels {
-		if k >= len(want) {
-			t.Text = ""
-			t.Hide()
-			canvas.Refresh(t)
-			continue
-		}
-		n := g.nodes[want[k]]
-		t.Text = n.name
-		if want[k] == g.match {
-			t.Color = theme.Color(theme.ColorNamePrimary)
-		} else {
-			t.Color = theme.Color(theme.ColorNameForeground)
-		}
-		sz := fyne.MeasureText(n.name, t.TextSize, t.TextStyle)
-		sx := n.x*g.scale + g.offX
-		sy := n.y*g.scale + g.offY
-		t.Move(fyne.NewPos(float32(sx)-sz.Width/2, float32(sy+n.r*g.scale)+2))
-		t.Show()
-		canvas.Refresh(t)
-	}
-}
+func (r *graphRenderer) Refresh() { canvas.Refresh(r.raster) }

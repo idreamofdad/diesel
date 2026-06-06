@@ -2,6 +2,7 @@ package main
 
 import (
 	"image"
+	"image/color"
 	"testing"
 
 	"diesel/internal/knowledge"
@@ -121,5 +122,25 @@ func TestGraphWidget_RendersPixels(t *testing.T) {
 	}
 	if !painted {
 		t.Fatal("graph rendered an empty image — no bubbles or edges were drawn")
+	}
+}
+
+// TestDrawLabel_Paints verifies the bundled font loads and node labels actually
+// rasterize (the entity-name labels drawn under each bubble).
+func TestDrawLabel_Paints(t *testing.T) {
+	face := labelFace(20)
+	if face == nil {
+		t.Fatal("labelFace returned nil — font failed to load")
+	}
+	img := image.NewRGBA(image.Rect(0, 0, 160, 48))
+	drawLabel(img, face, "Beckett", 80, 6, color.NRGBA{R: 255, G: 255, B: 255, A: 255})
+	painted := 0
+	for i := 3; i < len(img.Pix); i += 4 {
+		if img.Pix[i] != 0 {
+			painted++
+		}
+	}
+	if painted == 0 {
+		t.Fatal("drawLabel painted nothing")
 	}
 }

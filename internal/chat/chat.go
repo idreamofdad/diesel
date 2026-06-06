@@ -40,7 +40,7 @@ const (
 // loop forever or rack up unbounded background work; after this many rounds we
 // give up on the pass. (The reply path advertises no tools, so this cap is the
 // memory pass's alone.)
-const maxMemoryRounds = 10
+const maxMemoryRounds = 5
 
 // knowledgeTokenWarn is the rough token size of the injected graph blob past
 // which we log a warning. The graph is persistent memory and only grows, so
