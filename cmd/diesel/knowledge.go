@@ -36,6 +36,10 @@ func showKnowledgeDialog(win fyne.Window, knMgr *knowledge.Service) {
 		reload       func()
 		rebuildRight func()
 	)
+	// gw/graphActive are referenced by reload (defined above the graph view's
+	// own construction further down), so they're declared up here.
+	var gw *graphWidget
+	graphActive := false
 
 	entityList := widget.NewList(
 		func() int { return len(graph.Entities) },
@@ -64,6 +68,10 @@ func showKnowledgeDialog(win fyne.Window, knMgr *knowledge.Service) {
 		}
 		graph = g
 		entityList.Refresh()
+		if graphActive && gw != nil {
+			gw.selName = selected
+			gw.setGraph(graph)
+		}
 		rebuildRight()
 	}
 
@@ -183,6 +191,39 @@ func showKnowledgeDialog(win fyne.Window, knMgr *knowledge.Service) {
 		}
 	}
 
+	// ── Graph view (toggles with the entity list, sharing the edit panel) ──
+	gw = newGraphWidget(func(name string) {
+		selected = name
+		rebuildRight()
+	})
+	search := widget.NewEntry()
+	search.SetPlaceHolder("Search entities…")
+	search.OnChanged = func(s string) { gw.focusOn(s) }
+
+	listBox := container.NewBorder(
+		widget.NewLabelWithStyle("Entities", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		nil, nil, nil, entityList)
+	graphBox := container.NewBorder(search, nil, nil, nil, gw)
+	graphBox.Hide()
+	leftStack := container.NewStack(listBox, graphBox)
+
+	view := widget.NewRadioGroup([]string{"List", "Graph"}, func(s string) {
+		graphActive = s == "Graph"
+		if graphActive {
+			listBox.Hide()
+			graphBox.Show()
+			gw.selName = selected
+			gw.setGraph(graph)
+		} else {
+			graphBox.Hide()
+			listBox.Show()
+			gw.stopSim()
+		}
+	})
+	view.Horizontal = true
+	view.Required = true
+	view.SetSelected("List")
+
 	// ── Toolbar ──
 	addEntityBtn := widget.NewButton("Add entity", func() {
 		set := settings.Load()
@@ -230,19 +271,17 @@ func showKnowledgeDialog(win fyne.Window, knMgr *knowledge.Service) {
 	})
 	refreshBtn := widget.NewButton("Refresh", func() { reload() })
 
-	toolbar := container.NewHBox(addEntityBtn, delEntityBtn, refreshBtn)
+	toolbar := container.NewBorder(nil, nil,
+		container.NewHBox(addEntityBtn, delEntityBtn, refreshBtn), view)
 
-	split := container.NewHSplit(
-		container.NewBorder(widget.NewLabelWithStyle("Entities", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}), nil, nil, nil, entityList),
-		rightScroll,
-	)
-	split.Offset = 0.38
+	split := container.NewHSplit(leftStack, rightScroll)
+	split.Offset = 0.58
 
 	content := container.NewBorder(toolbar, nil, nil, nil, split)
 	reload()
 
 	d := dialog.NewCustom("Knowledge graph", "Close", content, win)
-	d.Resize(fyne.NewSize(720, 560))
+	d.Resize(fyne.NewSize(980, 680))
 	d.Show()
 }
 
