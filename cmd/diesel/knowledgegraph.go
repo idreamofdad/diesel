@@ -209,6 +209,14 @@ func (g *graphWidget) setGraph(kg knowledge.Graph) {
 	}
 	g.match = -1
 	g.hovered = -1
+	// Pre-relax the layout synchronously so the graph renders already settled —
+	// the animation may not tick until a frame or two after the view toggle, and
+	// we don't want to flash an empty or exploded graph in the meantime.
+	for i := 0; i < 400; i++ {
+		if gphStep(g.nodes, g.links, g.world, g.world) < gphSettle*float64(len(g.nodes)+1) {
+			break
+		}
+	}
 	g.fitted = false
 	g.ensureInitialView()
 	g.startSim()
@@ -391,7 +399,7 @@ func (g *graphWidget) startSim() {
 		g.ticks++
 		e := gphStep(g.nodes, g.links, g.world, g.world)
 		settled := (!g.dragging && e < gphSettle*float64(len(g.nodes)+1)) || g.ticks > gphMaxTicks
-		if settled && !g.fitted {
+		if settled && !g.fitted && g.size.Width > 0 {
 			g.autofit()
 			g.fitted = true
 		}
@@ -462,28 +470,33 @@ func (g *graphWidget) draw(w, h int) image.Image {
 }
 
 // fillCircle rasterizes an antialiased filled circle, compositing only within
-// the circle's bounding box so hundreds of bubbles stay cheap.
+// the circle's bounding box so hundreds of bubbles stay cheap. The path is
+// built in box-local coordinates because vector.Rasterizer maps its (0,0) to
+// the draw rectangle's Min — drawing in full-image coords with a sub-rect would
+// read an empty mask and paint nothing.
 func fillCircle(ras *vector.Rasterizer, dst *image.RGBA, cx, cy, r float32, c color.Color) {
 	if r <= 0 {
 		return
 	}
-	rect := image.Rect(int(math.Floor(float64(cx-r))), int(math.Floor(float64(cy-r))),
+	bb := image.Rect(int(math.Floor(float64(cx-r))), int(math.Floor(float64(cy-r))),
 		int(math.Ceil(float64(cx+r))), int(math.Ceil(float64(cy+r)))).Intersect(dst.Bounds())
-	if rect.Empty() {
+	if bb.Empty() {
 		return
 	}
+	cx, cy = cx-float32(bb.Min.X), cy-float32(bb.Min.Y)
 	const k = 0.5522847498307936
-	ras.Reset(dst.Bounds().Dx(), dst.Bounds().Dy())
+	ras.Reset(bb.Dx(), bb.Dy())
 	ras.MoveTo(cx+r, cy)
 	ras.CubeTo(cx+r, cy+r*k, cx+r*k, cy+r, cx, cy+r)
 	ras.CubeTo(cx-r*k, cy+r, cx-r, cy+r*k, cx-r, cy)
 	ras.CubeTo(cx-r, cy-r*k, cx-r*k, cy-r, cx, cy-r)
 	ras.CubeTo(cx+r*k, cy-r, cx+r, cy-r*k, cx+r, cy)
 	ras.ClosePath()
-	ras.Draw(dst, rect, image.NewUniform(c), image.Point{})
+	ras.Draw(dst, bb, image.NewUniform(c), image.Point{})
 }
 
-// fillLine rasterizes an antialiased thick line as a filled quad.
+// fillLine rasterizes an antialiased thick line as a filled quad, in box-local
+// coordinates (see fillCircle for why).
 func fillLine(ras *vector.Rasterizer, dst *image.RGBA, x1, y1, x2, y2, width float32, c color.Color) {
 	dx, dy := float64(x2-x1), float64(y2-y1)
 	ln := math.Hypot(dx, dy)
@@ -492,22 +505,24 @@ func fillLine(ras *vector.Rasterizer, dst *image.RGBA, x1, y1, x2, y2, width flo
 	}
 	nx := float32(-dy/ln) * width / 2
 	ny := float32(dx/ln) * width / 2
-	minX := math.Min(float64(x1), float64(x2)) - float64(width)
-	minY := math.Min(float64(y1), float64(y2)) - float64(width)
-	maxX := math.Max(float64(x1), float64(x2)) + float64(width)
-	maxY := math.Max(float64(y1), float64(y2)) + float64(width)
-	rect := image.Rect(int(math.Floor(minX)), int(math.Floor(minY)),
-		int(math.Ceil(maxX)), int(math.Ceil(maxY))).Intersect(dst.Bounds())
-	if rect.Empty() {
+	bb := image.Rect(
+		int(math.Floor(math.Min(float64(x1), float64(x2))-float64(width))),
+		int(math.Floor(math.Min(float64(y1), float64(y2))-float64(width))),
+		int(math.Ceil(math.Max(float64(x1), float64(x2))+float64(width))),
+		int(math.Ceil(math.Max(float64(y1), float64(y2))+float64(width))),
+	).Intersect(dst.Bounds())
+	if bb.Empty() {
 		return
 	}
-	ras.Reset(dst.Bounds().Dx(), dst.Bounds().Dy())
+	ox, oy := float32(bb.Min.X), float32(bb.Min.Y)
+	x1, y1, x2, y2 = x1-ox, y1-oy, x2-ox, y2-oy
+	ras.Reset(bb.Dx(), bb.Dy())
 	ras.MoveTo(x1+nx, y1+ny)
 	ras.LineTo(x2+nx, y2+ny)
 	ras.LineTo(x2-nx, y2-ny)
 	ras.LineTo(x1-nx, y1-ny)
 	ras.ClosePath()
-	ras.Draw(dst, rect, image.NewUniform(c), image.Point{})
+	ras.Draw(dst, bb, image.NewUniform(c), image.Point{})
 }
 
 // colorForType hashes the entity type to a stable hue — the same scheme the web
@@ -569,11 +584,23 @@ type graphRenderer struct {
 func (r *graphRenderer) Destroy() { r.g.stopSim() }
 
 func (r *graphRenderer) Layout(size fyne.Size) {
-	r.g.size = size
+	g := r.g
+	g.size = size
 	r.raster.Resize(size)
 	r.raster.Move(fyne.NewPos(0, 0))
-	r.g.ensureInitialView()
+	g.ensureInitialView()
+	// First real size after a (re)load — frame the graph now that the viewport
+	// is known. Guarded by fitted so user pan/zoom and plain window resizes
+	// don't snap the view back.
+	if !g.fitted && size.Width > 0 && len(g.nodes) > 0 {
+		g.autofit()
+		g.fitted = true
+	}
 	r.updateLabels()
+	// Force the raster to regenerate with the now-valid size/transform. Without
+	// this the view keeps showing the pre-size (empty) image once the sim has
+	// settled — the cause of the blank graph after the first toggle.
+	canvas.Refresh(r.raster)
 }
 
 func (r *graphRenderer) MinSize() fyne.Size { return fyne.NewSize(360, 360) }

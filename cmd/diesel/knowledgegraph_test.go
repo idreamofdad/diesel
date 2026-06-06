@@ -1,6 +1,7 @@
 package main
 
 import (
+	"image"
 	"testing"
 
 	"diesel/internal/knowledge"
@@ -89,5 +90,36 @@ func TestGraphWidget_SelectAndSearch(t *testing.T) {
 	}
 	if selected != "Mochi" {
 		t.Fatalf("focusOn should select Mochi, selected=%q", selected)
+	}
+}
+
+// TestGraphWidget_RendersPixels guards the "blank graph" failure mode: once the
+// widget has a real size and a populated graph, the raster must actually paint
+// something (the bug was the raster never redrawing after the size arrived).
+func TestGraphWidget_RendersPixels(t *testing.T) {
+	test.NewApp() // theme.Color needs a current app
+
+	gw := newGraphWidget(nil)
+	rend := gw.CreateRenderer()
+	gw.setGraph(knowledge.Graph{
+		Entities:  []knowledge.Entity{{Name: "A", Type: "person"}, {Name: "B", Type: "cat"}},
+		Relations: []knowledge.Relation{{From: "A", To: "B", RelationType: "likes"}},
+	})
+	gw.stopSim()
+	rend.Layout(fyne.NewSize(400, 300)) // sets size + transform, like a real layout
+
+	img, ok := gw.draw(400, 300).(*image.RGBA)
+	if !ok {
+		t.Fatal("draw did not return *image.RGBA")
+	}
+	painted := false
+	for i := 3; i < len(img.Pix); i += 4 { // alpha bytes
+		if img.Pix[i] != 0 {
+			painted = true
+			break
+		}
+	}
+	if !painted {
+		t.Fatal("graph rendered an empty image — no bubbles or edges were drawn")
 	}
 }
