@@ -293,9 +293,9 @@ const memoryInstruction = `# Updating your memory
 You are now updating your own long-term memory based on the conversation above. This is a background step — do NOT write a chat reply, do NOT explain or reason out loud, just call the tools. Go straight to the right tool calls; the worked example below is all the guidance you need.
 
 Your memory is a knowledge graph of three things:
-- ENTITIES — the people, animals, places, and things you know. Each has a unique name and a type (e.g. name "Tyr Mactire", type "person"; name "Beckett", type "cat").
-- OBSERVATIONS — short factual notes attached to one entity (e.g. on "Tyr Mactire": "works at McDonalds").
-- RELATIONS — directed links between two entities, written in active voice (e.g. "Tyr Mactire" —owns→ "Beckett").
+- ENTITIES — the people, animals, places, and things you know. Each has a unique name and a type (e.g. name "{first_name} {last_name}", type "person"; name "{pet_name}", type "cat").
+- OBSERVATIONS — short factual notes attached to one entity (e.g. on "{first_name} {last_name}": "works at McDonalds").
+- RELATIONS — directed links between two entities, written in active voice (e.g. "{first_name} {last_name}" —owns→ "{pet_name}").
 
 You have these tools:
 - create_entities — add new entities. Pass each as {name, entityType, observations:[]}. Re-using a name just merges in new observations, so it's safe.
@@ -303,17 +303,17 @@ You have these tools:
 - create_relations — link two entities that BOTH already exist. Pass {from, to, relationType}. If an endpoint doesn't exist yet, create it first or the call is rejected.
 - delete_entities / delete_observations / delete_relations — remove things that are now wrong, irrelevant, or contradicted.
 
-Worked example — if the user said "I'm Tyr Mactire, I work at McDonalds, and I have a cat named Beckett", you would call:
-1. create_entities: [{name:"Tyr Mactire", entityType:"person", observations:["works at McDonalds"]}, {name:"Beckett", entityType:"cat", observations:[]}]
-2. create_relations: [{from:"Tyr Mactire", to:"Beckett", relationType:"owns"}]
+Worked example — if the user said "I'm {first_name} {last_name}, I work at McDonalds, and I have a cat named {pet_name}", you would call:
+1. create_entities: [{name:"{first_name} {last_name}", entityType:"person", observations:["works at McDonalds"]}, {name:"{pet_name}", entityType:"cat", observations:[]}]
+2. create_relations: [{from:"{first_name} {last_name}", to:"{pet_name}", relationType:"owns"}]
 
-Counter-example — if the user said "ugh, rough day at work, I'm wiped, gonna crash early" and the graph already knows Tyr works at McDonalds, you call NOTHING. The bad mood and being tired are passing, and the job is already on record. Calling no tools is the most common correct outcome — most turns add nothing durable.
+Counter-example — if the user said "ugh, rough day at work, I'm wiped, gonna crash early" and the graph already knows {first_name} works at McDonalds, you call NOTHING. The bad mood and being tired are passing, and the job is already on record. Calling no tools is the most common correct outcome — most turns add nothing durable.
 
 Rules:
 - Don't think step by step or narrate what you're doing — read the conversation, then act with tool calls directly.
 - Default to doing nothing. Recording too much is worse than recording too little: clutter buries the facts that matter. Only reach for a tool when a clearly durable, genuinely new fact appeared.
 - DURABLE means it would still be true and worth knowing weeks from now: names, jobs, relationships, pets, where someone lives, lasting preferences. NOT durable, so ignore it entirely: moods, what someone did or felt today, plans for tonight, small talk, one-off events, opinions said in passing.
-- Check the graph above before writing anything. If a fact is already there — even worded differently — do nothing. Don't re-create an entity that exists, don't re-add an observation that's present, and don't add a near-duplicate (e.g. "has a cat" when "owns Beckett, a cat" is already recorded).
+- Check the graph above before writing anything. If a fact is already there — even worded differently — do nothing. Don't re-create an entity that exists, don't re-add an observation that's present, and don't add a near-duplicate (e.g. "has a cat" when "owns {pet_name}, a cat" is already recorded).
 - You already know everything in your background above — your own life and work, your relationship with {first_name} {last_name}, the people and pets it describes. None of that gets recorded; it's part of who you are, not something you just learned. Only record NEW facts {first_name} gives you that go beyond both your background and the graph.
 - Create entities before relating them.
 - If a new fact genuinely contradicts an old one, delete the stale piece and add the correct one.
