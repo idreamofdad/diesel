@@ -11,6 +11,7 @@
   import {
     fetchGraph,
     createEntity,
+    editEntity,
     deleteEntity,
     addObservation,
     editObservation,
@@ -47,6 +48,10 @@
   let editingRel = $state<KGRelation | null>(null);
   let relEditType = $state('');
   let relEditTarget = $state('');
+  // Inline entity editor (rename/retype the selected entity).
+  let editingEntity = $state(false);
+  let entName = $state('');
+  let entType = $state('');
 
   const selected = $derived(graph.entities.find(e => e.name === selectedName) ?? null);
   const touching = $derived(
@@ -89,6 +94,7 @@
     relTarget = otherNames[0] ?? '';
     cancelEdit();
     cancelRelEdit();
+    cancelEntityEdit();
   }
 
   async function addEntity() {
@@ -105,6 +111,35 @@
     if (!confirm(`Delete "${name}" and all its observations and relations?`)) return;
     await run(() => deleteEntity(name));
     if (selectedName === name) selectedName = '';
+  }
+
+  function startEntityEdit() {
+    if (!selected) return;
+    editingEntity = true;
+    entName = selected.name;
+    entType = selected.entityType;
+    actionError = '';
+  }
+
+  function cancelEntityEdit() {
+    editingEntity = false;
+    entName = '';
+    entType = '';
+  }
+
+  async function saveEntity() {
+    if (!selected) return;
+    const name = entName.trim();
+    const type = entType.trim();
+    if (!name) return;
+    if (name === selected.name && type === selected.entityType) {
+      cancelEntityEdit();
+      return;
+    }
+    const oldName = selected.name;
+    await run(() => editEntity(oldName, name, type));
+    selectedName = name;
+    cancelEntityEdit();
   }
 
   async function addObs() {
@@ -236,7 +271,27 @@
           {#if !selected}
             <p class="muted">Select an entity, or add one.</p>
           {:else}
-            <h3>{selected.name} <small>({selected.entityType})</small></h3>
+            {#if editingEntity}
+              <div class="entedit">
+                <input class="entname" placeholder="Name" bind:value={entName}
+                  onkeydown={(e) => {
+                    if (e.key === 'Enter') saveEntity();
+                    else if (e.key === 'Escape') cancelEntityEdit();
+                  }} />
+                <input class="enttype" placeholder="Type" bind:value={entType}
+                  onkeydown={(e) => {
+                    if (e.key === 'Enter') saveEntity();
+                    else if (e.key === 'Escape') cancelEntityEdit();
+                  }} />
+                <button class="act" title="Save" onclick={saveEntity} disabled={!entName.trim()}>✓</button>
+                <button class="del" title="Cancel" onclick={cancelEntityEdit}>↩</button>
+              </div>
+            {:else}
+              <div class="detailhead">
+                <h3>{selected.name} <small>({selected.entityType})</small></h3>
+                <button class="act" title="Rename / retype entity" onclick={startEntityEdit}>✎</button>
+              </div>
+            {/if}
 
             <div class="section-title">Observations</div>
             {#if selected.observations.length === 0}
@@ -407,6 +462,21 @@
   }
   .detail h3 { margin: 0 0 0.5rem; font-size: 1rem; }
   .detail h3 small { color: var(--muted); font-weight: normal; }
+  .detailhead {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+  }
+  .detailhead h3 { flex: 1 1 auto; word-break: break-word; }
+  .entedit {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.4rem;
+    margin-bottom: 0.5rem;
+  }
+  .entname { flex: 1 1 8rem; min-width: 0; }
+  .enttype { flex: 1 1 6rem; min-width: 0; }
   .section-title {
     margin-top: 0.85rem;
     margin-bottom: 0.35rem;

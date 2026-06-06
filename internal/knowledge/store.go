@@ -102,6 +102,89 @@ func (s *Store) DeleteEntities(ctx context.Context, names []string) error {
 	return nil
 }
 
+// EntityEdit renames and/or retypes one entity. Name identifies the existing
+// entity; NewName is its new name (equal to Name to change only the type) and
+// NewType its new type.
+type EntityEdit struct {
+	Name    string `json:"name"`
+	NewName string `json:"newName"`
+	NewType string `json:"newType"`
+}
+
+// EditEntities renames and/or retypes entities in place. A rename repoints the
+// entity's observations and both ends of its relations to the new name inside
+// one transaction, so the graph never dangles — the kg_* foreign keys cascade
+// on delete but not on update, so the references are moved by hand. The new
+// name must be free: renaming onto an existing entity is rejected rather than
+// silently merging two nodes. A missing entity is reported as a clear error.
+func (s *Store) EditEntities(ctx context.Context, edits []EntityEdit) error {
+	if len(edits) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("knowledge: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	for _, e := range edits {
+		oldName := strings.TrimSpace(e.Name)
+		newName := strings.TrimSpace(e.NewName)
+		newType := strings.TrimSpace(e.NewType)
+		if oldName == "" || newName == "" {
+			return fmt.Errorf("knowledge: entity name must not be empty")
+		}
+		ok, err := entityExistsTx(ctx, tx, oldName)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("knowledge: entity %q does not exist", oldName)
+		}
+		if newName == oldName {
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE kg_entities SET type = ? WHERE name = ?`, newType, oldName,
+			); err != nil {
+				return fmt.Errorf("knowledge: retype entity %q: %w", oldName, err)
+			}
+			continue
+		}
+		taken, err := entityExistsTx(ctx, tx, newName)
+		if err != nil {
+			return err
+		}
+		if taken {
+			return fmt.Errorf("knowledge: an entity named %q already exists", newName)
+		}
+		// Create the new node, repoint every reference to it, then drop the old
+		// node. In this order each statement leaves the foreign keys consistent,
+		// so immediate enforcement never trips and the final delete cascades over
+		// nothing.
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO kg_entities (name, type) VALUES (?, ?)`, newName, newType,
+		); err != nil {
+			return fmt.Errorf("knowledge: rename entity %q: %w", oldName, err)
+		}
+		for _, stmt := range []string{
+			`UPDATE kg_observations SET entity_name = ? WHERE entity_name = ?`,
+			`UPDATE kg_relations SET from_name = ? WHERE from_name = ?`,
+			`UPDATE kg_relations SET to_name = ? WHERE to_name = ?`,
+		} {
+			if _, err := tx.ExecContext(ctx, stmt, newName, oldName); err != nil {
+				return fmt.Errorf("knowledge: rename entity %q: %w", oldName, err)
+			}
+		}
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM kg_entities WHERE name = ?`, oldName,
+		); err != nil {
+			return fmt.Errorf("knowledge: rename entity %q: %w", oldName, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("knowledge: commit: %w", err)
+	}
+	return nil
+}
+
 // AddObservations appends facts to existing entities. The target entity must
 // already exist — a missing one is reported as a clear error (rather than the
 // raw foreign-key failure) so the model knows to create the entity first.

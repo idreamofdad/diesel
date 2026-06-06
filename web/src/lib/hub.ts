@@ -493,6 +493,12 @@ export async function createEntity(name: string, entityType: string): Promise<vo
   });
 }
 
+export async function editEntity(name: string, newName: string, newType: string): Promise<void> {
+  await knowledgePost('/api/v1/knowledge/entities/edit', {
+    edits: [{ name, newName, newType }],
+  });
+}
+
 export async function deleteEntity(name: string): Promise<void> {
   await knowledgePost('/api/v1/knowledge/entities/delete', { names: [name] });
 }

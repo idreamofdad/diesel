@@ -9,6 +9,9 @@
   import { onMount, onDestroy } from 'svelte';
   import {
     fetchGraph,
+    createEntity,
+    editEntity,
+    deleteEntity,
     addObservation,
     editObservation,
     deleteObservation,
@@ -54,6 +57,13 @@
   let editingRel = $state<KGRelation | null>(null);
   let relEditType = $state('');
   let relEditOther = $state('');
+  // Entity editing state. newName/newType drive the add-entity bar; editingEntity
+  // toggles the in-panel rename/retype form, with entName/entType its inputs.
+  let newName = $state('');
+  let newType = $state('');
+  let editingEntity = $state(false);
+  let entName = $state('');
+  let entType = $state('');
 
   let width = $state(800);
   let height = $state(600);
@@ -242,22 +252,36 @@
     return `${r.from} ${r.relationType} ${r.to}`;
   }
 
-  // ── Observation & relation editing ──
+  // ── Entity, observation & relation editing ──
   // Mutations write straight through the REST API — the same graph the model
-  // reads each turn — then patch the fresh observations and relations back into
-  // the existing nodes (by name) instead of calling load(): a full rebuild
-  // would re-seed the layout and drop the selection, jarring mid-edit. Entities
-  // don't change here, so node positions and the selection index stay valid.
-  async function refreshGraph() {
+  // reads each turn — then merge the fresh graph back in rather than calling
+  // load(): existing bubbles keep their simulated positions (reused by name),
+  // only genuinely new entities get seeded, and the selection is re-resolved by
+  // name so it survives a rename. A full rebuild would re-seed everything and
+  // drop the selection, jarring mid-edit.
+  async function refreshGraph(selectName?: string) {
+    const keep = selectName ?? (sel ? sel.name : null);
     const g = await fetchGraph();
-    const byName = new Map(g.entities.map(e => [e.name, e.observations ?? []]));
-    for (const node of nodes) {
-      const obs = byName.get(node.name);
-      if (obs) {
-        node.obs = obs;
-        node.r = 16 + Math.min(obs.length, 6) * 2;
+    const existing = new Map(nodes.map(n => [n.name, n]));
+    const ns: Node[] = g.entities.map((e, i) => {
+      const obs = e.observations ?? [];
+      const r = 16 + Math.min(obs.length, 6) * 2;
+      const prev = existing.get(e.name);
+      if (prev) {
+        prev.type = e.entityType;
+        prev.obs = obs;
+        prev.r = r;
+        return prev;
       }
-    }
+      // New entity — seed near the center so the sim pulls it into place.
+      const a = (i / Math.max(1, g.entities.length)) * Math.PI * 2;
+      return {
+        name: e.name, type: e.entityType, obs, r, fixed: false,
+        x: width / 2 + Math.cos(a) * 120, y: height / 2 + Math.sin(a) * 120,
+        vx: 0, vy: 0,
+      };
+    });
+    nodes = ns;
     const idx = new Map(nodes.map((n, i) => [n.name, i]));
     const ls: Link[] = [];
     for (const r of g.relations) {
@@ -266,14 +290,18 @@
       if (s !== undefined && t !== undefined) ls.push({ s, t, rel: r.relationType });
     }
     links = ls;
+    selected = keep != null && idx.has(keep) ? idx.get(keep)! : null;
     restart();
   }
 
-  async function run(fn: () => Promise<void>) {
+  // run wraps a mutation: perform it, then refresh. selectAfter names the entity
+  // to leave selected (e.g. a newly added or renamed one); without it the
+  // current selection is preserved by name.
+  async function run(fn: () => Promise<void>, selectAfter?: string) {
     actionError = '';
     try {
       await fn();
-      await refreshGraph();
+      await refreshGraph(selectAfter);
     } catch (e) {
       actionError = (e as Error).message;
     }
@@ -288,6 +316,9 @@
     editingRel = null;
     relEditType = '';
     relEditOther = '';
+    editingEntity = false;
+    entName = '';
+    entType = '';
     actionError = '';
   }
 
@@ -376,6 +407,51 @@
   async function removeRel(r: KGRelation) {
     await run(() => deleteRelation(r));
   }
+
+  // ── Entities ──
+  async function addEntity() {
+    const name = newName.trim();
+    if (!name) return;
+    const type = newType.trim();
+    // Select the new bubble so its (empty) panel is ready to fill in.
+    await run(() => createEntity(name, type), name);
+    newName = '';
+    newType = '';
+  }
+
+  function startEntityEdit() {
+    if (!sel) return;
+    editingEntity = true;
+    entName = sel.name;
+    entType = sel.type;
+    actionError = '';
+  }
+
+  function cancelEntityEdit() {
+    editingEntity = false;
+    entName = '';
+    entType = '';
+  }
+
+  async function saveEntity() {
+    if (!sel) return;
+    const name = entName.trim();
+    const type = entType.trim();
+    if (!name) return;
+    if (name === sel.name && type === sel.type) {
+      cancelEntityEdit();
+      return;
+    }
+    const oldName = sel.name;
+    // Keep the renamed entity selected via its new name.
+    await run(() => editEntity(oldName, name, type), name);
+    cancelEntityEdit();
+  }
+
+  async function removeEntity(name: string) {
+    if (!confirm(`Delete "${name}" and all its observations and relations?`)) return;
+    await run(() => deleteEntity(name));
+  }
 </script>
 
 <div class="page">
@@ -385,6 +461,14 @@
     <div class="spacer"></div>
     <button onclick={load} title="Reload">⟳ Reload</button>
   </header>
+
+  <div class="addbar">
+    <input placeholder="Name, e.g. Tyr Mactire" bind:value={newName}
+      onkeydown={(e) => e.key === 'Enter' && addEntity()} />
+    <input placeholder="Type, e.g. person" bind:value={newType}
+      onkeydown={(e) => e.key === 'Enter' && addEntity()} />
+    <button onclick={addEntity} disabled={!newName.trim()}>Add entity</button>
+  </div>
 
   {#if loadError}
     <p class="error">{loadError}</p>
@@ -422,8 +506,29 @@
 
     {#if sel}
       <aside class="panel">
-        <h3>{sel.name}</h3>
-        <div class="type" style="color:{colorFor(sel.type)}">{sel.type}</div>
+        {#if editingEntity}
+          <div class="entedit">
+            <input class="entname" placeholder="Name" bind:value={entName}
+              onkeydown={(e) => {
+                if (e.key === 'Enter') saveEntity();
+                else if (e.key === 'Escape') cancelEntityEdit();
+              }} />
+            <input class="enttype" placeholder="Type" bind:value={entType}
+              onkeydown={(e) => {
+                if (e.key === 'Enter') saveEntity();
+                else if (e.key === 'Escape') cancelEntityEdit();
+              }} />
+            <button class="act" title="Save" onclick={saveEntity} disabled={!entName.trim()}>✓</button>
+            <button class="act" title="Cancel" onclick={cancelEntityEdit}>↩</button>
+          </div>
+        {:else}
+          <div class="panelhead">
+            <h3>{sel.name}</h3>
+            <button class="act" title="Rename / retype entity" onclick={startEntityEdit}>✎</button>
+            <button class="act del" title="Delete entity" onclick={() => removeEntity(sel.name)}>✕</button>
+          </div>
+          <div class="type" style="color:{colorFor(sel.type)}">{sel.type}</div>
+        {/if}
         <div class="sec">Observations</div>
         {#if sel.obs.length === 0}<p class="muted">(none)</p>{/if}
         {#each sel.obs as o (o)}
@@ -507,6 +612,15 @@
   .spacer { flex: 1 1 auto; }
   .back { background: transparent; }
 
+  .addbar {
+    flex: 0 0 auto;
+    display: flex;
+    gap: 0.5rem;
+    padding: 0.5rem 1rem;
+    border-bottom: 1px solid var(--border);
+  }
+  .addbar input { flex: 1 1 auto; min-width: 0; }
+
   .error { color: #e06c6c; padding: 0.5rem 1rem; }
   .empty { color: var(--muted); padding: 0.5rem 1rem; }
 
@@ -562,6 +676,21 @@
   }
   .panel h3 { margin: 0; font-size: 1rem; }
   .panel .type { font-size: 0.8rem; margin-bottom: 0.4rem; }
+  .panelhead {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+  }
+  .panelhead h3 { flex: 1 1 auto; word-break: break-word; }
+  .entedit {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.3rem;
+    margin-bottom: 0.4rem;
+  }
+  .entname { flex: 1 1 8rem; min-width: 0; padding: 0.25rem 0.4rem; font-size: 0.85rem; }
+  .enttype { flex: 1 1 6rem; min-width: 0; padding: 0.25rem 0.4rem; font-size: 0.82rem; }
   .sec {
     margin-top: 0.7rem;
     font-size: 0.72rem;

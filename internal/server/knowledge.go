@@ -30,6 +30,7 @@ func (m *Manager) knowledgeStore() *knowledge.Store {
 func (m *Manager) registerKnowledgeRoutes(api *gin.RouterGroup) {
 	api.GET("/knowledge", m.handleKnowledgeRead)
 	api.POST("/knowledge/entities", m.handleKnowledgeCreateEntities)
+	api.POST("/knowledge/entities/edit", m.handleKnowledgeEditEntities)
 	api.POST("/knowledge/entities/delete", m.handleKnowledgeDeleteEntities)
 	api.POST("/knowledge/observations", m.handleKnowledgeAddObservations)
 	api.POST("/knowledge/observations/edit", m.handleKnowledgeEditObservations)
@@ -81,6 +82,25 @@ func (m *Manager) handleKnowledgeCreateEntities(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"entities": created})
+}
+
+func (m *Manager) handleKnowledgeEditEntities(c *gin.Context) {
+	store := m.knStoreOr503(c)
+	if store == nil {
+		return
+	}
+	var body struct {
+		Edits []knowledge.EntityEdit `json:"edits"`
+	}
+	if err := c.BindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if err := store.EditEntities(c.Request.Context(), body.Edits); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
 func (m *Manager) handleKnowledgeDeleteEntities(c *gin.Context) {

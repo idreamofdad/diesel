@@ -189,6 +189,55 @@ func TestEditRelations_FoldsExistingDuplicate(t *testing.T) {
 	assert.Equal(t, "likes", g.Relations[0].RelationType)
 }
 
+func TestEditEntities_RetypeOnly(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	_, err := s.CreateEntities(ctx, []Entity{{Name: "Tyr", Type: "person", Observations: []string{"a"}}})
+	require.NoError(t, err)
+	require.NoError(t, s.EditEntities(ctx, []EntityEdit{{Name: "Tyr", NewName: "Tyr", NewType: "wolf"}}))
+	g, err := s.ReadGraph(ctx)
+	require.NoError(t, err)
+	require.Len(t, g.Entities, 1)
+	assert.Equal(t, "wolf", g.Entities[0].Type)
+	assert.Equal(t, []string{"a"}, g.Entities[0].Observations)
+}
+
+func TestEditEntities_RenameRepointsObservationsAndRelations(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	_, err := s.CreateEntities(ctx, []Entity{
+		{Name: "A", Type: "person", Observations: []string{"likes tea"}},
+		{Name: "B", Type: "person"},
+	})
+	require.NoError(t, err)
+	_, err = s.CreateRelations(ctx, []Relation{{From: "A", To: "B", RelationType: "owns"}})
+	require.NoError(t, err)
+	require.NoError(t, s.EditEntities(ctx, []EntityEdit{{Name: "A", NewName: "Alpha", NewType: "person"}}))
+	g, err := s.ReadGraph(ctx)
+	require.NoError(t, err)
+	// A is gone; Alpha carries A's observations and the relation now starts at it.
+	var names []string
+	for _, e := range g.Entities {
+		names = append(names, e.Name)
+		if e.Name == "Alpha" {
+			assert.Equal(t, []string{"likes tea"}, e.Observations)
+		}
+	}
+	assert.Equal(t, []string{"Alpha", "B"}, names)
+	require.Len(t, g.Relations, 1)
+	assert.Equal(t, Relation{From: "Alpha", To: "B", RelationType: "owns"}, g.Relations[0])
+}
+
+func TestEditEntities_RejectsExistingTargetName(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	_, err := s.CreateEntities(ctx, []Entity{{Name: "A", Type: "p"}, {Name: "B", Type: "p"}})
+	require.NoError(t, err)
+	err = s.EditEntities(ctx, []EntityEdit{{Name: "A", NewName: "B", NewType: "p"}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "already exists")
+}
+
 func TestSearchNodes_MatchesAcrossFields(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
