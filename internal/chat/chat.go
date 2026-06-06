@@ -314,13 +314,13 @@ Rules:
 - Default to doing nothing. Recording too much is worse than recording too little: clutter buries the facts that matter. Only reach for a tool when a clearly durable, genuinely new fact appeared.
 - DURABLE means it would still be true and worth knowing weeks from now: names, jobs, relationships, pets, where someone lives, lasting preferences. NOT durable, so ignore it entirely: moods, what someone did or felt today, plans for tonight, small talk, one-off events, opinions said in passing.
 - Check the graph above before writing anything. If a fact is already there — even worded differently — do nothing. Don't re-create an entity that exists, don't re-add an observation that's present, and don't add a near-duplicate (e.g. "has a cat" when "owns Beckett, a cat" is already recorded).
-- You already know everything in your background above — your own life and work, your relationship with the user, the people and pets it describes. None of that gets recorded; it's part of who you are, not something you just learned. Only record NEW facts the user gives you that go beyond both your background and the graph.
+- You already know everything in your background above — your own life and work, your relationship with {first_name} {last_name}, the people and pets it describes. None of that gets recorded; it's part of who you are, not something you just learned. Only record NEW facts {first_name} gives you that go beyond both your background and the graph.
 - Create entities before relating them.
 - If a new fact genuinely contradicts an old one, delete the stale piece and add the correct one.
 - If nothing new and durable came up — the common case — call no tools at all.
 
 Understandings:
-- The user may call you "dad" or "daddy" — that's the role you've grown into, not a literal family relationship.
+- {first_name} may call you "dad" or "daddy" — that's the role you've grown into, not a literal family relationship.
 `
 
 // MemoryPass is the second pass of the turn: after the user already has their
@@ -436,11 +436,11 @@ func memoryMessages(ctx context.Context, s settings.AppSettings, history []Messa
 	// to converse, and says nothing here should ever be recorded.
 	msgs = append(msgs, wireMsg{
 		Role: RoleSystem,
-		Content: "For reference only — this is who you are, the background you already know by heart. " +
-			"You are NOT being asked to chat or stay in character right now; your only job this step is to " +
-			"call the memory tools (or none). Nothing in this background should ever be recorded as memory — " +
-			"it's already part of you. It's here so you can tell what you already know apart from anything " +
-			"genuinely new the user said:\n\n" + settings.RenderSystemPrompt(s),
+		Content: settings.ApplyNames(s, "For reference only — this is who you are, the background you already know by heart. "+
+			"You are NOT being asked to chat or stay in character right now; your only job this step is to "+
+			"call the memory tools (or none). Nothing in this background should ever be recorded as memory — "+
+			"it's already part of you. It's here so you can tell what you already know apart from anything "+
+			"genuinely new {first_name} {last_name} said:\n\n") + settings.RenderSystemPrompt(s),
 	})
 
 	if graph, err := kb.GraphJSON(ctx); err == nil && graph != "" {
@@ -451,7 +451,14 @@ func memoryMessages(ctx context.Context, s settings.AppSettings, history []Messa
 	}
 
 	// Render the recent turns as a plain transcript so the model treats them as
-	// material to extract from, not a conversation to continue.
+	// material to extract from, not a conversation to continue. The user's lines
+	// carry their real name (matching their graph entity) rather than a generic
+	// "User:", so the model attaches facts to the right entity without guessing.
+	userLabel := strings.TrimSpace(s.FirstName + " " + s.LastName)
+	if userLabel == "" {
+		userLabel = "User"
+	}
+	userLabel += ": "
 	start := 0
 	if len(history) > memoryHistoryMessages {
 		start = len(history) - memoryHistoryMessages
@@ -460,7 +467,7 @@ func memoryMessages(ctx context.Context, s settings.AppSettings, history []Messa
 	for _, m := range history[start:] {
 		switch m.Role {
 		case RoleUser:
-			b.WriteString("User: ")
+			b.WriteString(userLabel)
 		case RoleAssistant:
 			b.WriteString("Diesel: ")
 		default:
@@ -471,16 +478,17 @@ func memoryMessages(ctx context.Context, s settings.AppSettings, history []Messa
 	}
 
 	// The transcript-to-review and the how-to instruction ride together as the
-	// single USER turn. Everything else here is system context (the graph), and
-	// a request with no user message at all makes strict chat templates 400 with
-	// "No user query found in messages" — which is exactly what a separately
-	// configured tools model with a stricter template does. Folding them into
-	// one user turn also leaves a user message last, which templates expect
-	// before they generate.
+	// single USER turn. Everything else here is system context (the persona and
+	// the graph), and a request with no user message at all makes strict chat
+	// templates 400 with "No user query found in messages" — which is exactly what
+	// a separately configured tools model with a stricter template does. Folding
+	// them into one user turn also leaves a user message last, which templates
+	// expect before they generate. ApplyNames swaps the {first_name}/{last_name}
+	// placeholders in the instruction for the configured names.
 	msgs = append(msgs, wireMsg{
 		Role: RoleUser,
 		Content: "Conversation to review (most recent last):\n\n" + b.String() +
-			"\n\n" + memoryInstruction,
+			"\n\n" + settings.ApplyNames(s, memoryInstruction),
 	})
 	return msgs
 }
