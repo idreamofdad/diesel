@@ -314,6 +314,7 @@ Rules:
 - Default to doing nothing. Recording too much is worse than recording too little: clutter buries the facts that matter. Only reach for a tool when a clearly durable, genuinely new fact appeared.
 - DURABLE means it would still be true and worth knowing weeks from now: names, jobs, relationships, pets, where someone lives, lasting preferences. NOT durable, so ignore it entirely: moods, what someone did or felt today, plans for tonight, small talk, one-off events, opinions said in passing.
 - Check the graph above before writing anything. If a fact is already there — even worded differently — do nothing. Don't re-create an entity that exists, don't re-add an observation that's present, and don't add a near-duplicate (e.g. "has a cat" when "owns Beckett, a cat" is already recorded).
+- You already know everything in your background above — your own life and work, your relationship with the user, the people and pets it describes. None of that gets recorded; it's part of who you are, not something you just learned. Only record NEW facts the user gives you that go beyond both your background and the graph.
 - Create entities before relating them.
 - If a new fact genuinely contradicts an old one, delete the stale piece and add the correct one.
 - If nothing new and durable came up — the common case — call no tools at all.
@@ -362,7 +363,7 @@ func MemoryPass(ctx context.Context, s settings.AppSettings, history []Message, 
 		return nil
 	}
 
-	msgs := memoryMessages(ctx, history, kb)
+	msgs := memoryMessages(ctx, s, history, kb)
 
 	rounds := 0
 	for iter := 0; iter < maxMemoryRounds; iter++ {
@@ -417,15 +418,30 @@ func MemoryPass(ctx context.Context, s settings.AppSettings, history []Message, 
 	return nil
 }
 
-// memoryMessages builds the focused prompt for the memory pass. It deliberately
-// does NOT reuse the reply assembly: the full Diesel persona ("you are Diesel,
-// reply in 1–3 sentences, never break character") fights the extraction task
-// and pushes a small model into producing an in-character chat reply instead of
-// tool calls. Here the model sees only its current memory, a plain transcript
-// of the recent exchange, and the how-to instruction — nothing telling it to
-// converse.
-func memoryMessages(ctx context.Context, history []Message, kb KnowledgeBase) []wireMsg {
-	msgs := make([]wireMsg, 0, 3)
+// memoryMessages builds the focused prompt for the memory pass: the persona, the
+// current memory graph, a plain transcript of the recent exchange, and the
+// how-to instruction. The persona rides first, but framed as reference context
+// ("this is what you already know — don't record it"), NOT as a directive to
+// converse. It earns its place by killing duplicates: without it the model can't
+// tell which facts are already baked into who Diesel is (the user's job, the
+// cat, the relationship) and re-records them as observations every turn. The
+// framing prefix and the memoryInstruction both stress this step is tool-calls
+// only, to keep the persona's "reply in 1–3 sentences, stay in character" pull
+// from turning the pass back into a chat reply.
+func memoryMessages(ctx context.Context, s settings.AppSettings, history []Message, kb KnowledgeBase) []wireMsg {
+	msgs := make([]wireMsg, 0, 4)
+
+	// The persona is reference, not a role to perform: the label leads with
+	// "you're not chatting right now" precisely because the persona itself says
+	// to converse, and says nothing here should ever be recorded.
+	msgs = append(msgs, wireMsg{
+		Role: RoleSystem,
+		Content: "For reference only — this is who you are, the background you already know by heart. " +
+			"You are NOT being asked to chat or stay in character right now; your only job this step is to " +
+			"call the memory tools (or none). Nothing in this background should ever be recorded as memory — " +
+			"it's already part of you. It's here so you can tell what you already know apart from anything " +
+			"genuinely new the user said:\n\n" + settings.RenderSystemPrompt(s),
+	})
 
 	if graph, err := kb.GraphJSON(ctx); err == nil && graph != "" {
 		msgs = append(msgs, wireMsg{
