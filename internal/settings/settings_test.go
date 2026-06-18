@@ -96,6 +96,30 @@ func TestRenderSystemPrompt(t *testing.T) {
 	assert.NotContains(t, out, "Beckett")
 }
 
+func TestNudityDirectiveSwitch(t *testing.T) {
+	defer SetNudityAllowed(true) // restore the package default for other tests
+
+	s := AppSettings{FirstName: "F", LastName: "L", PetName: "P"}
+
+	// Default state: allowed. The flag-flip directive is present and the
+	// placeholder is fully substituted.
+	SetNudityAllowed(true)
+	assert.True(t, NudityAllowed())
+	allowed := RenderSystemPrompt(s)
+	assert.NotContains(t, allowed, "{nudity_directive}", "placeholder must be substituted")
+	assert.Contains(t, allowed, "Flip to true when the scene")
+	assert.NotContains(t, allowed, "you stay clothed at all times")
+
+	// --nudity=false swaps in the forbidden directive; the permissive wording
+	// must be gone so the model is never told it may undress.
+	SetNudityAllowed(false)
+	assert.False(t, NudityAllowed())
+	forbidden := RenderSystemPrompt(s)
+	assert.NotContains(t, forbidden, "{nudity_directive}", "placeholder must be substituted")
+	assert.Contains(t, forbidden, "you stay clothed at all times")
+	assert.NotContains(t, forbidden, "Flip to true when the scene")
+}
+
 func TestEstimateTokens(t *testing.T) {
 	cases := []struct {
 		name, in string

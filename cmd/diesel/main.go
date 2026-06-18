@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -46,6 +47,27 @@ const desktopOrigin = "desktop"
 
 var logger = logging.Component("diesel")
 
+// boolFlag is a bool command-line flag that REQUIRES an explicit value, so the
+// space-separated `--nudity false` form a user naturally types actually works.
+// The stdlib flag.Bool would parse `--nudity false` as nudity=true with a stray
+// "false" positional argument, because standard bool flags don't consume the
+// next token (they only accept the `--nudity=false` form). Implementing
+// flag.Value *without* the IsBoolFlag marker opts into the value-consuming form
+// while still parsing the token as a bool, so both `--nudity false` and
+// `--nudity=false` set it and omitting the flag keeps the registered default.
+type boolFlag bool
+
+func (b *boolFlag) String() string { return strconv.FormatBool(bool(*b)) }
+
+func (b *boolFlag) Set(s string) error {
+	v, err := strconv.ParseBool(strings.TrimSpace(s))
+	if err != nil {
+		return fmt.Errorf("invalid boolean %q (use true or false)", s)
+	}
+	*b = boolFlag(v)
+	return nil
+}
+
 // uiAsync runs work off the UI goroutine and delivers its result to onDone
 // back on the UI goroutine via fyne.Do. It's the GUI-side wrapper around
 // util.Async — util stays toolkit-agnostic (see internal/util), and the
@@ -59,10 +81,19 @@ func main() {
 	// keeps the platform user-config default. Parsed first so it's in effect
 	// before anything resolves a config path.
 	dataDir := flag.String("data-dir", "", "directory for Diesel's data (database, character image); defaults to the OS user config dir")
+	// -nudity gates whether the character can ever appear or describe himself
+	// nude. Defaults to true; pass `--nudity false` (or --nudity=false) to keep
+	// him clothed at all times. It's a process-wide policy applied to every
+	// channel (desktop, server, bridges), so it's a CLI switch rather than a
+	// persisted setting. See settings.SetNudityAllowed / chat.finalizeReply.
+	nudity := boolFlag(true)
+	flag.Var(&nudity, "nudity", "allow the character to appear nude when the scene calls for it; pass --nudity false to keep him clothed")
 	flag.Parse()
 	if *dataDir != "" {
 		util.SetConfigDir(*dataDir)
 	}
+	settings.SetNudityAllowed(bool(nudity))
+	logger.Debug().Bool("nudity", bool(nudity)).Msg("nudity option")
 
 	// OpenTelemetry: a no-op unless OTEL_EXPORTER_OTLP_ENDPOINT (or the
 	// trace-specific override) is set. Shutdown flushes in-flight spans on

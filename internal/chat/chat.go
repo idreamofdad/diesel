@@ -778,6 +778,16 @@ func finalizeReply(content string, history []Message, span trace.Span) Reply {
 			parsed.Pose = comfyui.DefaultImagePose
 		}
 	}
+	// Hard policy clamp for --nudity=false: pin the flag off regardless of
+	// what the model returned. Every channel (desktop, server, bridges)
+	// funnels through here, so clamping at this one chokepoint also keeps the
+	// portrait splice clothed and the next-turn "state of dress" reminder
+	// reporting "clothed". The persona prompt is told the same (see
+	// settings.RenderSystemPrompt), but this guarantees a stray true from a
+	// non-compliant model can't slip past.
+	if !settings.NudityAllowed() {
+		parsed.Naked = false
+	}
 	span.SetAttributes(
 		attribute.Bool("llm.structured_reply", true),
 		attribute.Int("llm.reply.length", len(parsed.Text)),

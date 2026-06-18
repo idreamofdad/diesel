@@ -196,6 +196,38 @@ func TestCompletion_ResponseParsing(t *testing.T) {
 	}
 }
 
+// TestCompletion_NudityDisabledClampsNaked verifies the --nudity=false policy
+// hard-clamps the per-turn flag in finalizeReply: even when the model returns
+// naked:true, the reply comes back clothed. The default (allowed) case proves
+// the clamp is the only thing flipping it, not a stub artifact.
+func TestCompletion_NudityDisabledClampsNaked(t *testing.T) {
+	defer settings.SetNudityAllowed(true) // restore the package default for other tests
+
+	const body = `{"text":"come closer","emotion":"horny","naked":true,"background":"pub","pose":"standing"}`
+
+	t.Run("allowed (default) lets the flag through", func(t *testing.T) {
+		settings.SetNudityAllowed(true)
+		srv, _ := stubChatServer(t, 200, jsonChoice(body, Usage{}))
+		reply, _, err := Completion(context.Background(),
+			settings.AppSettings{APIEndpoint: srv.URL, Model: "m"},
+			[]Message{{Role: RoleUser, Content: "hi"}},
+		)
+		require.NoError(t, err)
+		assert.True(t, reply.Naked)
+	})
+
+	t.Run("disabled pins the flag to false", func(t *testing.T) {
+		settings.SetNudityAllowed(false)
+		srv, _ := stubChatServer(t, 200, jsonChoice(body, Usage{}))
+		reply, _, err := Completion(context.Background(),
+			settings.AppSettings{APIEndpoint: srv.URL, Model: "m"},
+			[]Message{{Role: RoleUser, Content: "hi"}},
+		)
+		require.NoError(t, err)
+		assert.False(t, reply.Naked, "nudity disabled must clamp the flag even when the model returns true")
+	})
+}
+
 // TestCompletion_FallbackInheritsScene covers the history-aware part of
 // the fallback path: when a prior assistant turn exists, plain-text
 // replies inherit its scene/posture rather than teleporting Diesel back
