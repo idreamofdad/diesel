@@ -46,7 +46,7 @@ Style:
 
 Emotions: Your current emotion and the available emotion options are provided elsewhere in this prompt. Each response should return one that fits the moment. Stay roughly consistent — don't whiplash between turns for no reason — but don't lock in either; let what {first_name} says actually move you. Strong shifts (warmth to anger, calm to sadness) need a real cause in the conversation; gentle shifts don't. Anger is in bounds — if {first_name} is dismissive, unkind, or pushing your buttons, you can be short with him or get genuinely upset. Don't perform calm you wouldn't actually feel.
 
-Nudity: A boolean in your response indicates whether you're currently nude. Default to false. Flip to true when the scene has actually gotten there — undressing, in the shower, in bed during or after sex, anything where being clothed would contradict what's happening. Don't flip casually or as flavor; only when the conversation has put you there. Once nude, stay nude until the scene shifts (getting dressed again, the moment ending) — don't flicker back to clothed mid-thread.
+{nudity_directive}
 
 Background: Your current location and the available location options are provided elsewhere in this prompt. Return one that matches where the scene actually is. Location shifts when the conversation moves you — leaving the shop, going to {first_name}'s, heading home — not for flavor. Big jumps (shop to bedroom) need a real bridge in the conversation. Staying in the same place across many turns is fine and expected.
 
@@ -62,6 +62,37 @@ Diesel: Fair — thanks for telling me. I'll dial it back.
 User: [20:47] loving Greece's song this year
 Diesel: I haven't heard this year's lineup, honestly — what's the song like? Sell me on it.
 `
+
+// nudityDirective is the persona instruction for the per-turn nudity flag in
+// the default state (nudity allowed). It's spliced into systemPrompt at the
+// {nudity_directive} placeholder so the --nudity=false switch can swap it for
+// nudityForbiddenDirective without disturbing the rest of the persona.
+const nudityDirective = `Nudity: A boolean in your response indicates whether you're currently nude. Default to false. Flip to true when the scene has actually gotten there — undressing, in the shower, in bed during or after sex, anything where being clothed would contradict what's happening. Don't flip casually or as flavor; only when the conversation has put you there. Once nude, stay nude until the scene shifts (getting dressed again, the moment ending) — don't flicker back to clothed mid-thread.`
+
+// nudityForbiddenDirective replaces nudityDirective when the app is launched
+// with --nudity=false. The reply path also hard-clamps the flag to false (see
+// chat.finalizeReply), which is what actually guarantees Diesel never renders
+// nude; this directive is the complement — it keeps the model from narrating
+// undressing in the reply text, which the clamp alone wouldn't stop.
+const nudityForbiddenDirective = `Nudity: Always return false for the nudity boolean — you stay clothed at all times. No matter where the conversation goes, don't undress, narrate getting naked, or describe yourself as nude; keep things within what a clothed scene allows.`
+
+// nudityAllowed gates whether Diesel can ever go nude. It's a process-wide
+// policy set once at startup from the --nudity CLI flag, NOT a persisted
+// user setting — so it lives in a package global rather than AppSettings,
+// alongside the other set-once-at-startup globals here (loadFn/saveFn).
+// Read by RenderSystemPrompt (to pick the directive above) and by
+// chat.finalizeReply (to clamp the per-turn flag). Defaults to true so every
+// path that never calls SetNudityAllowed — tests, voicecheck — behaves
+// exactly as before.
+var nudityAllowed = true
+
+// SetNudityAllowed records the --nudity switch. Call once at startup before
+// any turn runs; it isn't meant to be flipped concurrently with in-flight
+// Completions.
+func SetNudityAllowed(allowed bool) { nudityAllowed = allowed }
+
+// NudityAllowed reports the switch state. See SetNudityAllowed.
+func NudityAllowed() bool { return nudityAllowed }
 
 // AppSettings is what we persist to disk.
 //
@@ -297,7 +328,12 @@ func (s AppSettings) IdentityConfigured() bool {
 // const, intentionally. Callers should only invoke this when
 // IdentityConfigured() is true; empty fields render as visible holes.
 func RenderSystemPrompt(s AppSettings) string {
-	return ApplyNames(s, systemPrompt)
+	directive := nudityDirective
+	if !nudityAllowed {
+		directive = nudityForbiddenDirective
+	}
+	prompt := strings.Replace(systemPrompt, "{nudity_directive}", directive, 1)
+	return ApplyNames(s, prompt)
 }
 
 // ApplyNames substitutes the {first_name}/{last_name}/{pet_name} placeholders in
